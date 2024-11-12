@@ -74,37 +74,76 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt)
 
 auto BlockManager::write_block(block_id_t block_id, const u8 *data)
     -> ChfsNullResult {
-  
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if (block_id >= block_cnt || data == nullptr) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
 
-  return KNullOk;
+  if (in_memory) {
+    // 内存模式
+    std::memcpy(block_data + block_id * block_sz, data, block_sz);
+  } else {
+    // 文件模式
+    lseek(fd, block_id * block_sz, SEEK_SET);
+    if (write(fd, data, block_sz) != block_sz) {
+      return ChfsNullResult(ErrorType::OUT_OF_RESOURCE);
+    }
+  }
+  return ChfsNullResult(std::monostate{});
 }
 
 auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
                                        usize offset, usize len)
     -> ChfsNullResult {
-  
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if (block_id >= block_cnt || data == nullptr || offset + len > block_sz) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
 
-  return KNullOk;
+  if (in_memory) {
+    // 内存模式
+    std::memcpy(block_data + block_id * block_sz + offset, data, len);
+  } else {
+    // 文件模式
+    lseek(fd, block_id * block_sz + offset, SEEK_SET);
+    if (write(fd, data, len) != len) {
+      return ChfsNullResult(ErrorType::OUT_OF_RESOURCE);
+    }
+  }
+  return ChfsNullResult(std::monostate{});
 }
 
 auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
+  if (block_id >= block_cnt || data == nullptr) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
 
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
-
-  return KNullOk;
+  if (in_memory) {
+    // 内存模式
+    std::memcpy(data, block_data + block_id * block_sz, block_sz);
+  } else {
+    // 文件模式
+    lseek(fd, block_id * block_sz, SEEK_SET);
+    if (read(fd, data, block_sz) != block_sz) {
+      return ChfsNullResult(ErrorType::OUT_OF_RESOURCE);
+    }
+  }
+  return ChfsNullResult(std::monostate{});
 }
 
 auto BlockManager::zero_block(block_id_t block_id) -> ChfsNullResult {
-  
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  if (block_id >= block_cnt) {
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
 
-  return KNullOk;
+  std::vector<u8> zero_data(block_sz, 0);
+
+  if (in_memory) {
+    // 内存模式
+    std::memcpy(block_data + block_id * block_sz, zero_data.data(), block_sz);
+  } else {
+    // 文件模式
+    return write_block(block_id, zero_data.data());
+  }
+  return ChfsNullResult(std::monostate{});
 }
 
 BlockManager::~BlockManager() {
