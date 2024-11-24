@@ -40,6 +40,12 @@ public:
   std::vector<u8> new_block_state_;
 };
 
+class LogEntry {
+public:
+  txn_id_t txn_id;
+  block_id_t block_id;
+  u8 new_block_state[DiskBlockSize];
+} __attribute__((packed));
 /**
  * `CommitLog` is a class that records the block edits into the
  * commit log. It's used to redo the operation when the system
@@ -62,6 +68,11 @@ public:
   /**
    * {Append anything if you need}
    */
+  const usize kLogBlockCnt = 1024;
+  std::mutex log_mtx;
+  usize entry_num;
+  usize max_log_entry_num;
+  u8* startPtr;
 };
 
 } // namespace chfs

@@ -79,10 +79,34 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt)
 BlockManager::BlockManager(const std::string &file, usize block_cnt,
                            bool is_log_enabled)
     : file_name_(file), block_cnt(block_cnt), in_memory(false) {
+  auto kLogBlockCnt = 1024;
   this->write_fail_cnt = 0;
   this->maybe_failed = false;
-  // TODO: Implement this function.
-  UNIMPLEMENTED();
+  // this->write_to_log = false;
+  this->fd = open(file.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+  CHFS_ASSERT(this->fd != -1, "Failed to open the block manager file");
+
+  auto file_sz = get_file_sz(this->file_name_);
+  if (file_sz == 0) {
+    initialize_file(this->fd, this->total_storage_sz());
+  } else {
+    this->block_cnt = file_sz / this->block_sz;
+    CHFS_ASSERT(this->total_storage_sz() == KDefaultBlockCnt * this->block_sz,
+                "The file size mismatches");
+  }
+
+  this->block_data =
+      static_cast<u8 *>(mmap(nullptr, this->total_storage_sz(),
+                             PROT_READ | PROT_WRITE, MAP_SHARED, this->fd, 0));
+  CHFS_ASSERT(this->block_data != MAP_FAILED, "Failed to mmap the data");
+
+  if (is_log_enabled) {
+    CHFS_ASSERT(this->block_cnt > kLogBlockCnt,
+                "not available blocks to store the log");
+    this->block_cnt -= kLogBlockCnt;
+    memset(this->block_data + this->block_cnt * this->block_sz, 0,
+           this->block_sz * kLogBlockCnt);
+  }
 }
 
 auto BlockManager::write_block(block_id_t block_id, const u8 *data)
@@ -191,6 +215,14 @@ auto BlockManager::sync(block_id_t block_id) -> ChfsNullResult {
 auto BlockManager::flush() -> ChfsNullResult {
   auto res = msync(this->block_data, this->block_sz * this->block_cnt,
                    MS_SYNC | MS_INVALIDATE);
+  if (res != 0)
+    return ChfsNullResult(ErrorType::INVALID);
+  return KNullOk;
+}
+
+auto BlockManager::sync_memory(void *data, usize size, int flags)
+    -> ChfsNullResult {
+  auto res = msync(data, size, flags);
   if (res != 0)
     return ChfsNullResult(ErrorType::INVALID);
   return KNullOk;
