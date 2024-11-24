@@ -114,6 +114,11 @@ public:
    */
   auto get_attr() const -> FileAttr { return inner_attr; }
 
+  /*
+   * Set the file size
+   */
+
+  void set_size(u64 file_size) { this->inner_attr.size = file_size; }
   /**
    * Get the file size
    */

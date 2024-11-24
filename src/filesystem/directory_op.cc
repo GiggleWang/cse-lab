@@ -39,8 +39,6 @@ auto dir_list_to_string(const std::list<DirectoryEntry> &entries)
 // {Your code here}
 auto append_to_directory(std::string src, std::string filename, inode_id_t id)
     -> std::string {
-
-  // TODO: Implement this function.
   //       Append the new directory entry to `src`.
   if (!src.empty()) {
     src += '/';
@@ -67,8 +65,6 @@ void parse_directory(std::string &src, std::list<DirectoryEntry> &list) {
 auto rm_from_directory(std::string src, std::string filename) -> std::string {
 
   auto res = std::string("");
-
-  // TODO: Implement this function.
   //       Remove the directory entry from `src`.
   std::list<DirectoryEntry> list;
   parse_directory(src, list);
@@ -84,7 +80,6 @@ auto rm_from_directory(std::string src, std::string filename) -> std::string {
  */
 auto read_directory(FileOperation *fs, inode_id_t id,
                     std::list<DirectoryEntry> &list) -> ChfsNullResult {
-  // TODO: Implement this function.
   auto read_result = fs->read_file(id); // 读取目录文件内容
   if (!read_result.is_ok()) {
     return read_result.unwrap_error(); // 如果读取失败，返回错误
@@ -119,18 +114,15 @@ auto FileOperation::lookup(inode_id_t id, const char *name)
 // {Your code here}
 auto FileOperation::mk_helper(inode_id_t id, const char *name, InodeType type)
     -> ChfsResult<inode_id_t> {
-  // TODO:
   // 1. Check if `name` already exists in the parent.
   //    If already exist, return ErrorType::AlreadyExist.
   // 2. Create the new inode.
   // 3. Append the new entry to the parent directory.
-  std::cout << "mkdir-1\n";
   auto lookup_result = lookup(id, name);
   if (lookup_result.is_ok()) {
     return ChfsResult<inode_id_t>(
         ErrorType::AlreadyExist); // 如果文件名已存在，返回 AlreadyExist 错误
   }
-  std::cout << "mkdir-2\n";
   auto inode_result = alloc_inode(type);
   if (!inode_result.is_ok()) {
     return inode_result.unwrap_error(); // 分配 inode 失败时返回错误
@@ -146,7 +138,6 @@ auto FileOperation::mk_helper(inode_id_t id, const char *name, InodeType type)
 
   std::vector<u8> content(new_dir_str.begin(), new_dir_str.end());
   write_file(id, content); // 将更新后的目录内容写回
-  std::cout << "mkdir-5\n";
   return ChfsResult<inode_id_t>(
       static_cast<inode_id_t>(inode_id)); // 返回新创建的 inode ID
 }
@@ -155,7 +146,6 @@ auto FileOperation::mk_helper(inode_id_t id, const char *name, InodeType type)
 auto FileOperation::unlink(inode_id_t parent, const char *name)
     -> ChfsNullResult {
 
-  // TODO:
   // 1. Remove the file, you can use the function `remove_file`
   // 2. Remove the entry from the directory.
   // 1. 删除文件，使用 remove_file 函数
