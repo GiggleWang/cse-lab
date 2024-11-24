@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "block/manager.h"
+#include "distributed/commit_log.h"
 
 namespace chfs {
 
@@ -111,6 +112,19 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt,
 
 auto BlockManager::write_block(block_id_t block_id, const u8 *data)
     -> ChfsNullResult {
+  if (logging_enabled) {
+    for (auto &op : this->log_operations) {
+      if (op->block_id_ == block_id) {
+        memcpy(op->new_block_state_.data(), data, this->block_sz);
+        return KNullOk;
+      }
+    }
+    std::vector<u8> buffer(this->block_sz);
+    memcpy(buffer.data(), data, this->block_sz);
+    log_operations.push_back(
+        std::make_shared<BlockOperation>(block_id, buffer));
+    return KNullOk;
+  }
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
@@ -139,7 +153,21 @@ auto BlockManager::write_block(block_id_t block_id, const u8 *data)
 auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
                                        usize offset, usize len)
     -> ChfsNullResult {
-
+  if (logging_enabled) {
+    for (auto &op : this->log_operations) {
+      if (op->block_id_ == block_id) {
+        memcpy(op->new_block_state_.data() + offset, data, len);
+        return KNullOk;
+      }
+    }
+    std::vector<u8> buffer(this->block_sz);
+    memcpy(buffer.data(), this->block_data + block_id * this->block_sz,
+           this->block_sz);
+    memcpy(buffer.data() + offset, data, len);
+    log_operations.push_back(
+        std::make_shared<BlockOperation>(block_id, buffer));
+    return KNullOk;
+  }
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
@@ -162,12 +190,21 @@ auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
     }
   }
   this->write_fail_cnt++;
+  // std::cout << "write_fail_cnt" << write_fail_cnt << std::endl;
   return ChfsNullResult(std::monostate{});
 }
 
 auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
   if (block_id >= block_cnt || data == nullptr) {
     return ChfsNullResult(ErrorType::INVALID_ARG);
+  }
+  if (this->logging_enabled) {
+    for (auto &op : this->log_operations) {
+      if (op->block_id_ == block_id) {
+        memcpy(data, op->new_block_state_.data(), this->block_sz);
+        return KNullOk;
+      }
+    }
   }
 
   if (in_memory) {

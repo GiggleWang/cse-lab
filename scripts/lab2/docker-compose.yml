@@ -9,9 +9,11 @@ services:
     depends_on:
       - meta
     network_mode: "host"
-    volumes:
-      - ../..:/home/stu/chfs
-      - ../../build/bin/fs_client:/home/stu/fs_client
+    platform: linux/aarch64
+    # volumes:
+    #   - ../..:/home/stu/chfs
+    #   - ../../build/bin/fs_client:/home/stu/fs_client
+
 
   meta:
     build:
@@ -22,8 +24,9 @@ services:
     ports:
       - 8080:8080
     network_mode: "host"
-    volumes:
-      - ../../build/bin/meta:/home/bin/meta
+    # volumes:
+    #   - ../../build/bin/meta:/home/bin/meta
+    platform: linux/aarch64
 
   data:
     build:
@@ -34,5 +37,6 @@ services:
       - 8082:8082
       - 8083:8083
     network_mode: "host"
-    volumes:
-      - ../../build/bin/data:/home/bin/data
+    # volumes:
+    #   - ../../build/bin/data:/home/bin/data
+    platform: linux/aarch64

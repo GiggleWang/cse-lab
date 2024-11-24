@@ -22,11 +22,11 @@ auto FileOperation::alloc_inode(InodeType type) -> ChfsResult<inode_id_t> {
   }
   auto free_block = free_block_res.unwrap();
   inode_res = inode_manager_->allocate_inode(type, free_block);
-
+  if (inode_res.is_err()) {
+    return inode_res.unwrap_error();
+  }
   return inode_res;
 }
-
-
 
 auto FileOperation::getattr(inode_id_t id) -> ChfsResult<FileAttr> {
   return this->inode_manager_->get_attr(id);
@@ -177,8 +177,8 @@ auto FileOperation::write_file(inode_id_t id, const std::vector<u8> &content)
       // if (inode_p->blocks[inode_p->nblocks - 1] == KInvalidBlockID) {
       //   std::cout << "errrrrrr2";
       // }
-      // std::cout<<"inode_p->get_indirect_block_id()"<<inode_p->get_indirect_block_id()<<std::endl;   
-      // std::cout<<inode_p->blocks[inode_p->nblocks - 1]<<std::endl;   
+      // std::cout<<"inode_p->get_indirect_block_id()"<<inode_p->get_indirect_block_id()<<std::endl;
+      // std::cout<<inode_p->blocks[inode_p->nblocks - 1]<<std::endl;
       auto res =
           this->block_allocator_->deallocate(inode_p->get_indirect_block_id());
       if (res.is_err()) {
@@ -264,7 +264,6 @@ err_ret:
   std::cerr << "write file return error: " << (int)error_code << std::endl;
   return ChfsNullResult(error_code);
 }
-
 
 // {Your code here}
 auto FileOperation::read_file(inode_id_t id) -> ChfsResult<std::vector<u8>> {

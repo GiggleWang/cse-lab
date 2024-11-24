@@ -87,6 +87,7 @@ inline auto MetadataServer::init_fs(const std::string &data_path) {
       operation_->block_manager_->set_may_fail(true);
     commit_log = std::make_shared<CommitLog>(operation_->block_manager_,
                                              is_checkpoint_enabled_);
+    commit_log->recover();
   }
 
   bind_handlers();
@@ -128,6 +129,9 @@ MetadataServer::MetadataServer(std::string const &address, u16 port,
 auto MetadataServer::mknode(u8 type, inode_id_t parent, const std::string &name)
     -> inode_id_t {
   std::lock_guard<std::mutex> lock(mtx);
+  if (is_log_enabled_) {
+    operation_->block_manager_->set_write_to_log(true);
+  }
   InodeType inode_type = InodeType::Unknown;
   if (type == DirectoryType) {
     inode_type = InodeType::Directory;
@@ -142,6 +146,22 @@ auto MetadataServer::mknode(u8 type, inode_id_t parent, const std::string &name)
   if (mk_res.is_err()) {
     return KInvalidInodeID;
   }
+  if (is_log_enabled_) {
+    auto log_ops = operation_->block_manager_->set_write_to_log(false);
+    // auto txn_id = commit_log->new_txn_id();
+    auto txn_id = commit_log->new_txn_id();
+    commit_log->append_log(txn_id, log_ops);
+    // std::cout<<"append_log--- txn_id:"<<txn_id<<std::endl;
+    for (const auto &op : log_ops) {
+      auto write_res = operation_->block_manager_->write_block(
+          op->block_id_, op->new_block_state_.data());
+      if (write_res.is_err()) {
+        return KInvalidInodeID;
+      }
+    }
+    // std::cout<<"commit_log--- txn_id:"<<txn_id<<std::endl;
+    commit_log->commit_log(txn_id);
+  }
   return mk_res.unwrap();
 }
 
@@ -155,6 +175,9 @@ auto MetadataServer::unlink(inode_id_t parent, const std::string &name)
   }
   auto type = type_res.unwrap();
   if (type == InodeType::Directory) {
+    if (is_log_enabled_) {
+      operation_->block_manager_->set_write_to_log(true);
+    }
     auto look_res = this->operation_->lookup(parent, name.data());
     if (look_res.is_err()) {
       return false;
@@ -162,6 +185,20 @@ auto MetadataServer::unlink(inode_id_t parent, const std::string &name)
     auto res = this->operation_->unlink(parent, name.data());
     if (res.is_err()) {
       return false;
+    }
+    if (is_log_enabled_) {
+      auto log_ops = operation_->block_manager_->set_write_to_log(false);
+      // auto txn_id = commit_log->new_txn_id();
+      auto txn_id = commit_log->new_txn_id();
+      commit_log->append_log(txn_id, log_ops);
+      for (const auto &op : log_ops) {
+        auto write_res = operation_->block_manager_->write_block(
+            op->block_id_, op->new_block_state_.data());
+        if (write_res.is_err()) {
+          return false; // 如果写入失败，返回 false
+        }
+      }
+      commit_log->commit_log(txn_id);
     }
     return true;
   }

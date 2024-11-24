@@ -68,11 +68,17 @@ public:
   /**
    * {Append anything if you need}
    */
+  txn_id_t new_txn_id();
+  const txn_id_t FINISHED_TXN_ID =
+      (1UL << 32) - 1; //如果一个txn已经完成，那么就将其赋此值
   const usize kLogBlockCnt = 1024;
   std::mutex log_mtx;
   usize entry_num;
   usize max_log_entry_num;
-  u8* startPtr;
+  u8 *startPtr;
+  txn_id_t txn_num;
+  txn_id_t latest_txn;
+  txn_id_t begin_txn;
 };
 
 } // namespace chfs

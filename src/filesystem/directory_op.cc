@@ -137,7 +137,10 @@ auto FileOperation::mk_helper(inode_id_t id, const char *name, InodeType type)
   auto new_dir_str = append_to_directory(dir_str, name, inode_id);
 
   std::vector<u8> content(new_dir_str.begin(), new_dir_str.end());
-  write_file(id, content); // 将更新后的目录内容写回
+  auto write_res = write_file(id, content); // 将更新后的目录内容写回
+  if (write_res.is_err()) {
+    return write_res.unwrap_error();
+  }
   return ChfsResult<inode_id_t>(
       static_cast<inode_id_t>(inode_id)); // 返回新创建的 inode ID
 }

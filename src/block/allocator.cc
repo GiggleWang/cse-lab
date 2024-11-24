@@ -130,7 +130,10 @@ auto BlockAllocator::allocate() -> ChfsResult<block_id_t> {
 
       block_id_t bit_index = *res;
       bitmap.set(bit_index);
-      bm->write_block(i + this->bitmap_block_id, buffer.data());
+      auto write_res = bm->write_block(i + this->bitmap_block_id, buffer.data());
+      if(write_res.is_err()){
+        return write_res.unwrap_error();
+      }
       retval = i * (bm->block_size() * KBitsPerByte) + bit_index;
 
       // std::cout<<"allocate "<<retval<<std::endl;
