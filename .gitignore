@@ -243,3 +243,5 @@ docs/dev
 
 # Submission zip files
 *.zip
+
+third_party/rpclib/
