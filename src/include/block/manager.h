@@ -150,7 +150,6 @@ public:
    */
   auto set_may_fail(bool may_fail) -> void { this->maybe_failed = may_fail; }
 
-
   /**
    * Enables or disables logging and returns the recorded log operations when
    * disabling.
@@ -172,6 +171,13 @@ public:
       log_operations.clear();     // 清空内部日志记录
       return logs;                // 返回日志操作
     }
+  }
+  auto flush_log() -> ChfsNullResult {
+    auto res = msync(this->block_data + this->block_cnt * this->block_sz,
+                     this->block_sz * 1024, MS_SYNC | MS_INVALIDATE);
+    if (res != 0)
+      return ChfsNullResult(ErrorType::INVALID);
+    return KNullOk;
   }
 };
 

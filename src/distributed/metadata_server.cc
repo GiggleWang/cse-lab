@@ -148,8 +148,8 @@ auto MetadataServer::mknode(u8 type, inode_id_t parent, const std::string &name)
   }
   if (is_log_enabled_) {
     auto log_ops = operation_->block_manager_->set_write_to_log(false);
-    // auto txn_id = commit_log->new_txn_id();
     auto txn_id = commit_log->new_txn_id();
+    // auto txn_id = commit_log->gen_txn_id();
     commit_log->append_log(txn_id, log_ops);
     // std::cout<<"append_log--- txn_id:"<<txn_id<<std::endl;
     for (const auto &op : log_ops) {
@@ -188,7 +188,6 @@ auto MetadataServer::unlink(inode_id_t parent, const std::string &name)
     }
     if (is_log_enabled_) {
       auto log_ops = operation_->block_manager_->set_write_to_log(false);
-      // auto txn_id = commit_log->new_txn_id();
       auto txn_id = commit_log->new_txn_id();
       commit_log->append_log(txn_id, log_ops);
       for (const auto &op : log_ops) {

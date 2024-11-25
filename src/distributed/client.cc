@@ -1,12 +1,7 @@
 #include "distributed/client.h"
-#include "common/config.h"
-#include "common/error_code.h"
 #include "common/macros.h"
-#include "common/result.h"
 #include "common/util.h"
 #include "distributed/metadata_server.h"
-#include "metadata/inode.h"
-#include <vector>
 
 namespace chfs {
 
@@ -55,7 +50,7 @@ auto ChfsClient::unlink(inode_id_t parent, std::string const &name)
   }
   auto unlink_ok = unlink_res.unwrap()->as<bool>();
   if (!unlink_ok) {
-    return ErrorType::INVALID;
+    return ErrorType::DONE;
   }
   return KNullOk;
 }
@@ -68,9 +63,9 @@ auto ChfsClient::lookup(inode_id_t parent, const std::string &name)
     return lookup_res.unwrap_error();
   }
   auto inode_id = lookup_res.unwrap()->as<inode_id_t>();
-  if (inode_id == KInvalidInodeID) {
-    return ChfsResult<inode_id_t>(ErrorType::INVALID);
-  }
+  // if (inode_id == KInvalidInodeID) {
+  //   return ChfsResult<inode_id_t>(ErrorType::INVALID);
+  // }
   return ChfsResult<inode_id_t>(inode_id);
 }
 
@@ -188,7 +183,7 @@ auto ChfsClient::write_file(inode_id_t id, usize offset, std::vector<u8> data)
     end_block_id--;
     end_block_offset = block_size;
   }
-  if (end_block_id > block_map.size()) {
+  if (end_block_id >= block_map.size()) {
     auto map_size = block_map.size();
     for (int i = map_size; i <= end_block_id; i++) {
       // allocate block
