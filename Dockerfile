@@ -36,3 +36,5 @@ RUN cat /tmp/mypasswd | chpasswd
 USER stu
 
 WORKDIR /home/stu/
+
+CMD ["zsh"]

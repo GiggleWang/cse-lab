@@ -130,10 +130,7 @@ auto BlockAllocator::allocate() -> ChfsResult<block_id_t> {
 
       block_id_t bit_index = *res;
       bitmap.set(bit_index);
-      auto write_res = bm->write_block(i + this->bitmap_block_id, buffer.data());
-      if(write_res.is_err()){
-        return write_res.unwrap_error();
-      }
+      bm->write_block(i + this->bitmap_block_id, buffer.data());
       retval = i * (bm->block_size() * KBitsPerByte) + bit_index;
 
       // std::cout<<"allocate "<<retval<<std::endl;
@@ -159,8 +156,7 @@ auto BlockAllocator::deallocate(block_id_t block_id) -> ChfsNullResult {
   // 计算块所在的位图块和位图中的索引
   // block_id_t block_offset =
   //     block_id - this->bitmap_block_id * (bm->block_size() * KBitsPerByte);
-  block_id_t bitmap_block_index =
-      block_id / (bm->block_size() * KBitsPerByte);
+  block_id_t bitmap_block_index = block_id / (bm->block_size() * KBitsPerByte);
   block_id_t bit_index = block_id % (bm->block_size() * KBitsPerByte);
 
   std::vector<u8> buffer(bm->block_size());
