@@ -91,4 +91,10 @@ struct InstallSnapshotReply {
   )
 };
 
+template <typename Command> struct LogEntry {
+  int index;
+  int term;
+  Command command;
+};
+
 } /* namespace chfs */

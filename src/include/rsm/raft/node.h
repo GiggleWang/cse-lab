@@ -5,11 +5,13 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <stdarg.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include "block/manager.h"
 #include "librpc/client.h"
@@ -144,14 +146,57 @@ private:
   std::unique_ptr<std::thread> background_apply;
 
   /* Lab3: Your code here */
-  int support_id; //在本次投票中支持的Node的id
+  // FOR FOLLOWER
+  int support_id; //在本次投票中支持的Node的id 即论文中的votedFor
+  std::vector<LogEntry<Command>> log_vector; //即论文中的log[]
+
+  /**
+   * @brief
+   * 检查当前节点的日志是否与requestVoteArgs的日志同步或者当前日志晚于其日志
+   * 也就是“candidate’s log is at least as up-to-date as receiver’s log”
+   */
+  bool check_log_up_to_date(RequestVoteArgs requestVoteArgs) {
+    LogEntry<Command> last_log = this->log_vector.back();
+    auto last_log_term = last_log.term;
+    if (last_log_term < requestVoteArgs.lastLogTerm) {
+      return true;
+    }
+    // 如果当前节点的term比request_vote_args的还大
+    if (last_log_term > requestVoteArgs.lastLogTerm) {
+      return false;
+    }
+    // 如果当前节点的term于request_vote_args的一致，并且index比他大
+    if (last_log_term == requestVoteArgs.lastLogTerm) {
+      // FIXME: maybe have some wrong here
+      if (this->log_vector.size() - 1 > requestVoteArgs.lastLogIndex) {
+        return false;
+      }
+    }
+    return true;
+  }
+  /**
+   * @brief 重设support_id
+   *
+   * @param id
+   */
+  void set_support_id(int id) {
+    this->support_id = id;
+    // FIXME:
+  }
+
+  // FOR CANDIDATE
+  int granted_votes;
+  // next_index:对于每个服务器，下一个日志条目的索引发送到该服务器（初始化为领导者最后的日志索引+1）
+  std::unique_ptr<int[]> next_index;
+  // 对于每个服务器，已知要复制的最高日志项的索引（初始化为0，单调增加）
+  std::unique_ptr<int[]> match_index;
 };
 
 template <typename StateMachine, typename Command>
 RaftNode<StateMachine, Command>::RaftNode(int node_id,
                                           std::vector<RaftNodeConfig> configs)
     : network_stat(true), node_configs(configs), my_id(node_id), stopped(true),
-      role(RaftRole::Follower), current_term(0), leader_id(-1) {
+      role(RaftRole::Follower), current_term(0), leader_id(-1), support_id(-1) {
   auto my_config = node_configs[my_id];
 
   /* launch RPC server */
@@ -267,10 +312,28 @@ auto RaftNode<StateMachine, Command>::get_snapshot() -> std::vector<u8> {
 template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::request_vote(RequestVoteArgs args)
     -> RequestVoteReply {
+  RequestVoteReply reject_request_vote_reply(this->current_term, false,
+                                             this->my_id);
   /* Lab3: Your code here */
+  // 如果args.term < this->current_term，拒绝
   if (args.term < this->current_term) {
-    return RequestVoteReply(this->current_term, false, this->my_id);
+    return reject_request_vote_reply;
   }
+  // 如果本轮已经投票（且不是当前id），拒绝
+  if (this->current_term == args.term && this->support_id != -1) {
+    if (this->support_id != args.candidateId) {
+      return reject_request_vote_reply;
+    }
+  }
+  // 如果log没有uptodate，拒绝
+  if (!this->check_log_up_to_date(args)) {
+    // FIXME:
+    return reject_request_vote_reply;
+  }
+  this->set_support_id(args.candidateId);
+  this->leader_id = args.candidateId;
+  // FIXME:
+  return RequestVoteReply(this->current_term, true, this->my_id);
   // return RequestVoteReply();
 }
 
@@ -278,7 +341,33 @@ template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::handle_request_vote_reply(
     int target, const RequestVoteArgs arg, const RequestVoteReply reply) {
   /* Lab3: Your code here */
-  return;
+  // 已经不是候选人状态
+  if (this->role != RaftRole::Candidate) {
+    return;
+  }
+  // 自己已经过了任期,是一张废票
+  if (this->current_term > arg.term) {
+    return;
+  }
+  if (this->current_term < reply.term) {
+    // 说明已经输了这个任期的选举
+    this->set_support_id(-1);
+    this->role = RaftRole::Follower;
+    this->current_term = reply.term;
+    return;
+  }
+  // 票有效，处理票
+  if (reply.voteGranted) {
+    this->granted_votes++;
+    if (this->granted_votes >= rpc_clients_map.size() / 2 + 1) {
+      //赢得选举
+      this->role = RaftRole::Leader;
+      for (int i = 0; i < node_configs.size(); i++) {
+        this->match_index[i] = 0;
+        this->next_index[i] = this->log_vector.size(); // FIXME:
+      }
+    }
+  }
 }
 
 template <typename StateMachine, typename Command>
