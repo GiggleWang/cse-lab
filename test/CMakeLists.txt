@@ -35,8 +35,8 @@ foreach (chfs_test_source ${CHFS_TEST_SOURCES})
             --gtest_catch_exceptions=0
             DISCOVERY_TIMEOUT 120
             PROPERTIES
-            TIMEOUT 1000
-            TEST_FILTER RaftTest*
+            TIMEOUT 500
+            TEST_FILTER Raft*
             )
 
     target_link_libraries(${chfs_test_name} chfs gtest gmock_main)
