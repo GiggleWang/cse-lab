@@ -481,251 +481,57 @@ template <typename StateMachine, typename Command>
 auto RaftNode<StateMachine, Command>::append_entries(
     RpcAppendEntriesArgs rpc_arg) -> AppendEntriesReply {
   /* Lab3: Your code here */
-  std::unique_lock<std::mutex> lock(mtx);
-  bool is_meta_changed = false;
-  bool is_log_changed = false;
-  AppendEntriesReply reply;
+  std::unique_lock<std::mutex> lock(this->mtx);
+  const AppendEntriesReply reject_reply(this->leader_id, this->current_term,
+                                        false);
+  const AppendEntriesReply success_reply(this->leader_id, this->current_term,
+                                         true);
+  if (rpc_arg.leader_id == this->leader_id) {
+    this->update_last_time();
+  }
+  if (rpc_arg.term < this->current_term) {
+    // 已经过期，拒绝
+    return reject_reply;
+  }
+  if (this->leader_id != rpc_arg.leader_id) {
+    this->leader_id = rpc_arg.leader_id;
+    this->update_last_time();
+  }
+  this->role = RaftRole::Follower;
+  // 当前的日志晚于同步日志
+  if (rpc_arg.lastLogIndex > this->log_vector.size() - 1) {
+    return reject_reply;
+  }
+  // 如果过往日志不同
+  if (rpc_arg.lastLogIndex >= 0) {
+    if (rpc_arg.lastLogTerm != this->log_vector[rpc_arg.lastLogIndex].term) {
+      return reject_reply;
+    }
+  }
+  // 如果是心跳
+  if (rpc_arg.log_index_vector.empty()) {
+    if (rpc_arg.lastCommit > this->commit_idx) {
+      commit_idx = std::min(rpc_arg.lastCommit, rpc_arg.lastLogIndex);
+    }
+    return success_reply;
+  }
   AppendEntriesArgs<Command> arg =
       transform_rpc_append_entries_args<Command>(rpc_arg);
-  if (leader_id == arg.leader_id) {
-    last_time = std::chrono::time_point_cast<std::chrono::milliseconds>(
-                    std::chrono::high_resolution_clock::now())
-                    .time_since_epoch()
-                    .count();
+  log_vector.resize(arg.lastLogIndex + 1);
+  log_vector.insert(log_vector.end(), arg.log_vector.begin(),
+                    arg.log_vector.end());
+  log_storage->updateLogs(log_vector);
+  if (rpc_arg.term > this->current_term) {
+    this->current_term = rpc_arg.term;
+    this->set_support_id(-1);
   }
-  //! debug//
-  // RAFT_LOG("Receive Real AppendEntriesArgs from %d", rpc_arg.leaderId);
-  //! debug//
-  if (arg.term > current_term) {
-    if (leader_id != arg.leader_id) {
-      leader_id = arg.leader_id;
-      last_time = std::chrono::time_point_cast<std::chrono::milliseconds>(
-                      std::chrono::high_resolution_clock::now())
-                      .time_since_epoch()
-                      .count();
-    }
-    role = RaftRole::Follower;
-    current_term = arg.term;
-    support_id = -1;
-    is_meta_changed = true;
-    /**
-     * Reply false if log doesn’t contain an entry at prevLogIndex
-     * whose term matches prevLogTerm
-     */
-    if (log_vector.size() - 1 < arg.lastLogIndex ||
-        log_vector[arg.lastLogIndex].term != arg.lastLogTerm) {
-      //! debug//
-      // RAFT_LOG("Reply false! my last index:%lu, my last term:%d,
-      // prevLogIndex:%d, prevLogTerm:%d", log_entry_list.size() - 1,
-      // log_entry_list[log_entry_list.size() - 1].term, arg.prevLogIndex,
-      // arg.prevLogTerm);
-      //! debug//
-      reply.term = current_term;
-      reply.append_successfully = false;
-    } else {
-      /**
-       * Now we promise that the entry before(including) prevLog is the same
-       * between Follower and Leader. So we just need to append new entries from
-       * (prevIndex + 1) If Follower has inconsitent entry, discard them
-       */
-      log_vector.resize(arg.lastLogIndex + 1);
-      std::vector<LogEntry<Command>> new_entry_list = arg.log_vector;
-      for (const LogEntry<Command> &entry : new_entry_list) {
-        log_vector.push_back(entry);
-      }
-      is_log_changed = true;
-      /**
-       * If leaderCommit > commitIndex, set commitIndex =
-       * min(leaderCommit, index of last new entry)
-       */
-      int last_new_entry_index = log_vector.size() - 1;
-      if (arg.lastCommit > commit_idx) {
-        commit_idx = arg.lastCommit < last_new_entry_index
-                         ? arg.lastCommit
-                         : last_new_entry_index;
-      }
-      reply.term = current_term;
-      reply.append_successfully = true;
-    }
-  } else if (arg.term == current_term) {
-    if (leader_id != arg.leader_id) {
-      leader_id = arg.leader_id;
-      last_time = std::chrono::time_point_cast<std::chrono::milliseconds>(
-                      std::chrono::high_resolution_clock::now())
-                      .time_since_epoch()
-                      .count();
-    }
-    role = RaftRole::Follower;
-    /**
-     * Reply false if log doesn’t contain an entry at prevLogIndex
-     * whose term matches prevLogTerm
-     */
-    if (log_vector.size() - 1 < arg.lastLogIndex ||
-        log_vector[arg.lastLogIndex].term != arg.lastLogTerm) {
-      //! debug//
-      // RAFT_LOG("Reply false! my last index:%lu, my last term:%d,
-      // prevLogIndex:%d, prevLogTerm:%d", log_entry_list.size() - 1,
-      // log_entry_list[log_entry_list.size() - 1].term, arg.prevLogIndex,
-      // arg.prevLogTerm);
-      //! debug//
-      reply.term = current_term;
-      reply.append_successfully = false;
-    } else {
-      /**
-       * Now we promise that the entry before(including) prevLog is the same
-       * between Follower and Leader. So we just need to append new entries from
-       * (prevIndex + 1) If Follower has inconsitent entry, discard them
-       */
-      /**
-       * But there is a very corner case here, if it receives a empty
-       * list(heartbeat) do we need to erase behind?
-       */
-      log_vector.resize(arg.lastLogIndex + 1);
-      std::vector<LogEntry<Command>> new_entry_list = arg.log_vector;
-      for (const LogEntry<Command> &entry : new_entry_list) {
-        log_vector.push_back(entry);
-      }
-      is_log_changed = true;
-      //! debug//
-      // RAFT_LOG("log entry list size now:%lu, arg.prevLogIndex: %d, entry list
-      // size: %lu", log_entry_list.size(), arg.prevLogIndex,
-      // new_entry_list.size());
-      //! debug//
-      /**
-       * If leaderCommit > commitIndex, set commitIndex =
-       * min(leaderCommit, index of last new entry)
-       */
-      int last_new_entry_index = log_vector.size() - 1;
-      if (arg.lastCommit > commit_idx) {
-        commit_idx = arg.lastCommit < last_new_entry_index
-                         ? arg.lastCommit
-                         : last_new_entry_index;
-      }
-      reply.term = current_term;
-      reply.append_successfully = true;
-    }
-  } else {
-    reply.term = current_term;
-    reply.append_successfully = false;
+  if (rpc_arg.lastCommit > this->commit_idx) {
+    commit_idx =
+        std::min(rpc_arg.lastCommit, static_cast<int>(log_vector.size() - 1));
   }
-  //[ persistency ]//
-  if (is_meta_changed) {
-    log_storage->updateMetaData(current_term, support_id);
-  }
-  if (is_log_changed) {
-    log_storage->updateLogs(log_vector);
-  }
-  //[ persistency ]//
-  return reply;
+  return success_reply;
 }
 
-// template <typename StateMachine, typename Command>
-// void RaftNode<StateMachine, Command>::handle_append_entries_reply(
-//     int node_id, const AppendEntriesArgs<Command> arg,
-//     const AppendEntriesReply reply) {
-//   /* Lab3: Your code here */
-//   std::unique_lock<std::mutex> lock(mtx);
-//   last_time = std::chrono::time_point_cast<std::chrono::milliseconds>(
-//                   std::chrono::high_resolution_clock::now())
-//                   .time_since_epoch()
-//                   .count();
-//   /** This means this term has been finished.
-//    *  A new candidate has been trying to become a new leader.
-//    *  Or even has been become a new leader.
-//    *  Now it should give up leader and become follower again.
-//    *  And then it don't have ability to do anything about this reply.
-//    */
-//   if (reply.term > current_term) {
-//     role = RaftRole::Follower;
-//     current_term = reply.term;
-//     support_id = -1;
-//     //! debug//
-//     RAFT_LOG("I am follower now");
-//     //! debug//
-//     //[ persistency ]//
-//     log_storage->updateMetaData(current_term, support_id);
-//     //[ persistency ]//
-//     return;
-//   }
-//   if (role != RaftRole::Leader) {
-//     // If this server has been not a leader anymore, it don't have ability to
-//     do
-//     // anything about this reply.
-//     return;
-//   }
-//   // if(reply.isHeartbeat){
-//   //     return;
-//   // }
-//   if (reply.append_successfully == false) {
-//     /**
-//      * There are two situation will cause reply's false
-//      * 1. arg.term < reply.term
-//      * 2. prevLogIndex's entry is inconsistent which means next_index of this
-//      * follower should be smaller
-//      */
-//     if (reply.term > arg.term) {
-//       /**
-//        * We can't promise that arg.term is the same as current_term so we
-//        need
-//        * to handle it specifically here
-//        */
-//       return;
-//     } else {
-
-//       //! debug//
-//       // RAFT_LOG("%d's next_index - 1 : %d", node_id, next_index[node_id] -
-//       1);
-//       // RAFT_LOG("%d, %d, %d", arg.term, arg.prevLogTerm, arg.prevLogIndex);
-//       //! debug//
-//       next_index[node_id] = next_index[node_id] - 1;
-//     }
-//   } else {
-//     //! Attention: we must choose bigger one, arg.prevLogIndex +
-//     //! arg.logEntryList.size() can be smaller than now match_index[node_id]
-//     //! Because a former reply can be received later!!!
-//     int reply_match_index = arg.lastLogIndex + arg.log_vector.size();
-//     if (reply_match_index > match_index[node_id]) {
-//       match_index[node_id] = arg.lastLogIndex + arg.log_vector.size();
-//     }
-//     //! debug//
-//     // RAFT_LOG("%d's next_index old:%d, new:%d", node_id,
-//     next_index[node_id],
-//     // match_index[node_id] + 1);
-//     //! debug//
-//     next_index[node_id] = match_index[node_id] + 1;
-//     /**
-//      * If there exists an N such that N > commitIndex, a majority
-//      * of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex
-//      = N
-//      */
-//     const auto MACHINE_NUM = rpc_clients_map.size();
-//     const auto LAST_INDEX = log_vector.size() - 1;
-//     for (int N = LAST_INDEX; N > commit_idx; --N) {
-//       if (log_vector[N].term != current_term) {
-//         break;
-//       }
-//       // This node itself must match
-//       int num_of_matched = 1;
-//       for (auto map_it = rpc_clients_map.begin();
-//            map_it != rpc_clients_map.end(); ++map_it) {
-//         if (map_it->first == my_id) {
-//           continue;
-//         }
-//         if (match_index[map_it->first] >= N) {
-//           ++num_of_matched;
-//         }
-//         if (num_of_matched >= MACHINE_NUM / 2 + 1) {
-//           commit_idx = N;
-//           break;
-//         }
-//       }
-//       if (commit_idx == N) {
-//         break;
-//       }
-//     }
-//   }
-//   return;
-// }
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::handle_append_entries_reply(
     int node_id, const AppendEntriesArgs<Command> arg,
