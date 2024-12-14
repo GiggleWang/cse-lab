@@ -14,7 +14,6 @@
 #include "block/manager.h"
 #include "librpc/client.h"
 #include "librpc/server.h"
-#include "rsm/config.h"
 #include "rsm/raft/log.h"
 #include "rsm/raft/protocol.h"
 #include "rsm/state_machine.h"
@@ -239,7 +238,7 @@ public:
    */
   void set_support_id(int id) {
     this->support_id = id;
-    log_storage->updateMetaData(current_term, support_id);
+    log_storage->term_and_support_id_update(current_term, support_id);
   }
 };
 
@@ -302,17 +301,21 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id,
   log_vector.push_back(init_entry);
 
   // RaftLog for persistence
-  std::string node_log_filename =
-      "/tmp/raft_log/node" + std::to_string(node_id);
+  std::string node_log_filename = "/tmp/raft_log/" + std::to_string(node_id);
   bool is_recover = is_file_exist(node_log_filename);
   auto block_manager =
       std::shared_ptr<BlockManager>(new BlockManager(node_log_filename));
-  log_storage = std::make_unique<RaftLog<Command>>(block_manager, is_recover);
+  // log_storage = std::make_unique<RaftLog<Command>>(
+  //     block_manager, is_file_exist(node_log_filename), this->current_term,
+  //     this->support_id, this->log_vector);
+  log_storage = std::make_unique<RaftLog<Command>>(
+      block_manager, is_file_exist(node_log_filename));
+
   if (is_recover) {
     log_storage->recover(current_term, support_id, log_vector);
   } else {
-    log_storage->updateMetaData(current_term, support_id);
-    log_storage->updateLogs(log_vector);
+    log_storage->term_and_support_id_update(current_term, support_id);
+    log_storage->log_entry_update(log_vector);
   }
 
   RAFT_LOG("A new raft node init");
@@ -383,7 +386,7 @@ auto RaftNode<StateMachine, Command>::new_command(std::vector<u8> cmd_data,
     command.deserialize(cmd_data, command.size());
     LogEntry<Command> entry(log_vector.size(), this->current_term, command);
     log_vector.push_back(entry);
-    log_storage->updateLogs(log_vector);
+    log_storage->log_entry_update(log_vector);
     return {true, this->current_term, log_vector.size() - 1};
   }
   return std::make_tuple(false, -1, -1);
@@ -520,7 +523,7 @@ auto RaftNode<StateMachine, Command>::append_entries(
   log_vector.resize(arg.lastLogIndex + 1);
   log_vector.insert(log_vector.end(), arg.log_vector.begin(),
                     arg.log_vector.end());
-  log_storage->updateLogs(log_vector);
+  log_storage->log_entry_update(log_vector);
   if (rpc_arg.term > this->current_term) {
     this->current_term = rpc_arg.term;
     this->set_support_id(-1);

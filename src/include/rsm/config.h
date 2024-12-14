@@ -10,3 +10,8 @@ const int BACKEND_ELECTION_INTERVAL = 100;
 const int BACKEND_COMMIT_INTERVAL = 50;
 // run_background_apply的循环间隔
 const int BACKEND_APPLY_INTERVAL = 10;
+// log中记录term_and_support_id的inode
+const int TERM_AND_SUPPORT_INODE_ID = 1;
+// log中记录log_entry的inode
+const int LOG_ENTRY_INODE_ID = 2;
+const int MAX_INODE_NUM = 16;
