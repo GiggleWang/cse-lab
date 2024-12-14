@@ -147,7 +147,7 @@ public:
   int support_id;
   int granted_votes;
   int commit_idx;
-  int last_applied;
+  int latest_apply;
 
   unsigned long last_time;
   std::unique_ptr<int[]> next_index;
@@ -248,7 +248,7 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id,
                                           std::vector<RaftNodeConfig> configs)
     : network_stat(true), node_configs(configs), my_id(node_id), stopped(true),
       role(RaftRole::Follower), current_term(0), leader_id(-1), support_id(-1),
-      granted_votes(0), commit_idx(0), last_applied(0) {
+      granted_votes(0), commit_idx(0), latest_apply(0) {
   auto my_config = node_configs[my_id];
 
   /* launch RPC server */
@@ -619,107 +619,146 @@ auto RaftNode<StateMachine, Command>::append_entries(
   return reply;
 }
 
+// template <typename StateMachine, typename Command>
+// void RaftNode<StateMachine, Command>::handle_append_entries_reply(
+//     int node_id, const AppendEntriesArgs<Command> arg,
+//     const AppendEntriesReply reply) {
+//   /* Lab3: Your code here */
+//   std::unique_lock<std::mutex> lock(mtx);
+//   last_time = std::chrono::time_point_cast<std::chrono::milliseconds>(
+//                   std::chrono::high_resolution_clock::now())
+//                   .time_since_epoch()
+//                   .count();
+//   /** This means this term has been finished.
+//    *  A new candidate has been trying to become a new leader.
+//    *  Or even has been become a new leader.
+//    *  Now it should give up leader and become follower again.
+//    *  And then it don't have ability to do anything about this reply.
+//    */
+//   if (reply.term > current_term) {
+//     role = RaftRole::Follower;
+//     current_term = reply.term;
+//     support_id = -1;
+//     //! debug//
+//     RAFT_LOG("I am follower now");
+//     //! debug//
+//     //[ persistency ]//
+//     log_storage->updateMetaData(current_term, support_id);
+//     //[ persistency ]//
+//     return;
+//   }
+//   if (role != RaftRole::Leader) {
+//     // If this server has been not a leader anymore, it don't have ability to
+//     do
+//     // anything about this reply.
+//     return;
+//   }
+//   // if(reply.isHeartbeat){
+//   //     return;
+//   // }
+//   if (reply.append_successfully == false) {
+//     /**
+//      * There are two situation will cause reply's false
+//      * 1. arg.term < reply.term
+//      * 2. prevLogIndex's entry is inconsistent which means next_index of this
+//      * follower should be smaller
+//      */
+//     if (reply.term > arg.term) {
+//       /**
+//        * We can't promise that arg.term is the same as current_term so we
+//        need
+//        * to handle it specifically here
+//        */
+//       return;
+//     } else {
+
+//       //! debug//
+//       // RAFT_LOG("%d's next_index - 1 : %d", node_id, next_index[node_id] -
+//       1);
+//       // RAFT_LOG("%d, %d, %d", arg.term, arg.prevLogTerm, arg.prevLogIndex);
+//       //! debug//
+//       next_index[node_id] = next_index[node_id] - 1;
+//     }
+//   } else {
+//     //! Attention: we must choose bigger one, arg.prevLogIndex +
+//     //! arg.logEntryList.size() can be smaller than now match_index[node_id]
+//     //! Because a former reply can be received later!!!
+//     int reply_match_index = arg.lastLogIndex + arg.log_vector.size();
+//     if (reply_match_index > match_index[node_id]) {
+//       match_index[node_id] = arg.lastLogIndex + arg.log_vector.size();
+//     }
+//     //! debug//
+//     // RAFT_LOG("%d's next_index old:%d, new:%d", node_id,
+//     next_index[node_id],
+//     // match_index[node_id] + 1);
+//     //! debug//
+//     next_index[node_id] = match_index[node_id] + 1;
+//     /**
+//      * If there exists an N such that N > commitIndex, a majority
+//      * of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex
+//      = N
+//      */
+//     const auto MACHINE_NUM = rpc_clients_map.size();
+//     const auto LAST_INDEX = log_vector.size() - 1;
+//     for (int N = LAST_INDEX; N > commit_idx; --N) {
+//       if (log_vector[N].term != current_term) {
+//         break;
+//       }
+//       // This node itself must match
+//       int num_of_matched = 1;
+//       for (auto map_it = rpc_clients_map.begin();
+//            map_it != rpc_clients_map.end(); ++map_it) {
+//         if (map_it->first == my_id) {
+//           continue;
+//         }
+//         if (match_index[map_it->first] >= N) {
+//           ++num_of_matched;
+//         }
+//         if (num_of_matched >= MACHINE_NUM / 2 + 1) {
+//           commit_idx = N;
+//           break;
+//         }
+//       }
+//       if (commit_idx == N) {
+//         break;
+//       }
+//     }
+//   }
+//   return;
+// }
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::handle_append_entries_reply(
     int node_id, const AppendEntriesArgs<Command> arg,
     const AppendEntriesReply reply) {
   /* Lab3: Your code here */
-  std::unique_lock<std::mutex> lock(mtx);
-  last_time = std::chrono::time_point_cast<std::chrono::milliseconds>(
-                  std::chrono::high_resolution_clock::now())
-                  .time_since_epoch()
-                  .count();
-  /** This means this term has been finished.
-   *  A new candidate has been trying to become a new leader.
-   *  Or even has been become a new leader.
-   *  Now it should give up leader and become follower again.
-   *  And then it don't have ability to do anything about this reply.
-   */
-  if (reply.term > current_term) {
-    role = RaftRole::Follower;
-    current_term = reply.term;
-    support_id = -1;
-    //! debug//
-    RAFT_LOG("I am follower now");
-    //! debug//
-    //[ persistency ]//
-    log_storage->updateMetaData(current_term, support_id);
-    //[ persistency ]//
+  std::unique_lock<std::mutex> lock(this->mtx);
+  this->update_last_time();
+  if (this->role != RaftRole::Leader) {
+    // 说明反馈无效
     return;
   }
-  if (role != RaftRole::Leader) {
-    // If this server has been not a leader anymore, it don't have ability to do
-    // anything about this reply.
+  if (reply.term > this->current_term) {
+    this->set_support_id(-1);
+    this->role = RaftRole::Follower;
+    this->current_term = reply.term;
     return;
   }
-  // if(reply.isHeartbeat){
-  //     return;
-  // }
-  if (reply.append_successfully == false) {
-    /**
-     * There are two situation will cause reply's false
-     * 1. arg.term < reply.term
-     * 2. prevLogIndex's entry is inconsistent which means next_index of this
-     * follower should be smaller
-     */
-    if (reply.term > arg.term) {
-      /**
-       * We can't promise that arg.term is the same as current_term so we need
-       * to handle it specifically here
-       */
-      return;
-    } else {
-
-      //! debug//
-      // RAFT_LOG("%d's next_index - 1 : %d", node_id, next_index[node_id] - 1);
-      // RAFT_LOG("%d, %d, %d", arg.term, arg.prevLogTerm, arg.prevLogIndex);
-      //! debug//
-      next_index[node_id] = next_index[node_id] - 1;
-    }
-  } else {
-    //! Attention: we must choose bigger one, arg.prevLogIndex +
-    //! arg.logEntryList.size() can be smaller than now match_index[node_id]
-    //! Because a former reply can be received later!!!
-    int reply_match_index = arg.lastLogIndex + arg.log_vector.size();
-    if (reply_match_index > match_index[node_id]) {
-      match_index[node_id] = arg.lastLogIndex + arg.log_vector.size();
-    }
-    //! debug//
-    // RAFT_LOG("%d's next_index old:%d, new:%d", node_id, next_index[node_id],
-    // match_index[node_id] + 1);
-    //! debug//
+  // 如果走到这里，说明是有效回复
+  if (reply.append_successfully) {
+    // 更新match_index & next_index
+    const int _match_index = arg.lastLogIndex + arg.log_vector.size();
+    match_index[node_id] = std::max(match_index[node_id], _match_index);
     next_index[node_id] = match_index[node_id] + 1;
-    /**
-     * If there exists an N such that N > commitIndex, a majority
-     * of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
-     */
-    const auto MACHINE_NUM = rpc_clients_map.size();
-    const auto LAST_INDEX = log_vector.size() - 1;
-    for (int N = LAST_INDEX; N > commit_idx; --N) {
-      if (log_vector[N].term != current_term) {
-        break;
-      }
-      // This node itself must match
-      int num_of_matched = 1;
-      for (auto map_it = rpc_clients_map.begin();
-           map_it != rpc_clients_map.end(); ++map_it) {
-        if (map_it->first == my_id) {
-          continue;
-        }
-        if (match_index[map_it->first] >= N) {
-          ++num_of_matched;
-        }
-        if (num_of_matched >= MACHINE_NUM / 2 + 1) {
-          commit_idx = N;
-          break;
-        }
-      }
-      if (commit_idx == N) {
-        break;
-      }
+    this->maybe_update_commit_idx();
+    return;
+  } else {
+    // 两种可能：1.term不合适 2.index条目和之前的不一样
+    if (arg.term != reply.term) {
+      return;
     }
+    next_index[node_id]--;
+    return;
   }
-  return;
 }
 
 template <typename StateMachine, typename Command>
@@ -867,46 +906,30 @@ void RaftNode<StateMachine, Command>::run_background_commit() {
         return;
       }
       /* Lab3: Your code here */
-      mtx.lock();
-      if (role == RaftRole::Leader) {
-        for (auto map_it = rpc_clients_map.begin();
-             map_it != rpc_clients_map.end(); ++map_it) {
-          if (map_it->first == my_id) {
+      {
+        std::unique_lock<std::mutex> lock(this->mtx);
+        if (this->role != RaftRole::Leader) {
+          goto sleep;
+        }
+        for (const auto &[peer_id, _] : rpc_clients_map) {
+          if (peer_id == my_id)
             continue;
-          }
-          if (next_index[map_it->first] < log_vector.size()) {
-            //! debug//
-            // RAFT_LOG("%d machine's next index is %d, log entry list
-            // size:%zu", map_it->first, next_index[map_it->first],
-            // log_entry_list.size());
-            //! debug//
-            std::vector<LogEntry<Command>> append_entry_list;
-            append_entry_list.clear();
-            for (int i = next_index[map_it->first]; i < log_vector.size();
-                 ++i) {
-              append_entry_list.push_back(log_vector[i]);
-            }
-            AppendEntriesArgs<Command> args;
-            args.term = current_term;
-            args.leader_id = my_id;
-            args.lastLogIndex = next_index[map_it->first] - 1;
-            //! debug//
-            // RAFT_LOG("send request to %d node, prev log index: %d",
-            // map_it->first, args.prevLogIndex);
-            //! debug//
-            args.lastLogTerm = log_vector[args.lastLogIndex].term;
-            args.lastCommit = commit_idx;
-            //! debug//
-            // RAFT_LOG("Leader's commit_index: %d", commit_index);
-            //! debug//
-            args.log_vector = append_entry_list;
-            thread_pool->enqueue(&RaftNode::send_append_entries, this,
-                                 map_it->first, args);
+          if (next_index[peer_id] < log_vector.size()) {
+            // 同步日志
+            AppendEntriesArgs<Command> args(
+                this->my_id, this->current_term, next_index[peer_id] - 1,
+                log_vector[next_index[peer_id] - 1].term, this->commit_idx);
+            // 提取需要追加的日志条目
+            args.log_vector = std::vector<LogEntry<Command>>(
+                log_vector.begin() + next_index[peer_id], log_vector.end());
+            thread_pool->enqueue(&RaftNode::send_append_entries, this, peer_id,
+                                 args);
           }
         }
       }
-      mtx.unlock();
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    sleep:
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(BACKEND_COMMIT_INTERVAL));
     }
   }
 
@@ -926,65 +949,22 @@ void RaftNode<StateMachine, Command>::run_background_apply() {
         return;
       }
       /* Lab3: Your code here */
-      mtx.lock();
-      if (last_applied < commit_idx) {
-        for (int i = last_applied + 1; i <= commit_idx; ++i) {
-          state->apply_log(log_vector[i].command);
+      {
+        std::unique_lock<std::mutex> lock(this->mtx);
+        if (this->commit_idx > this->latest_apply) {
+          for (int i = latest_apply + 1; i <= commit_idx; ++i) {
+            state->apply_log(log_vector[i].command);
+          }
+          latest_apply = commit_idx;
         }
-        last_applied = commit_idx;
       }
-      mtx.unlock();
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(BACKEND_APPLY_INTERVAL));
     }
   }
 
   return;
 }
-
-// template <typename StateMachine, typename Command>
-// void RaftNode<StateMachine, Command>::run_background_ping() {
-//   // Periodly send empty append_entries RPC to the followers.
-
-//   // Only work for the leader.
-
-//   /* Uncomment following code when you finish */
-//   RAFT_LOG("background ping start");
-//   while (true) {
-//     {
-//       if (is_stopped()) {
-//         RAFT_LOG("background ping end");
-//         return;
-//       }
-//       /* Lab3: Your code here */
-//       mtx.lock();
-//       if (role == RaftRole::Leader) {
-//         // Send heartbeat to every Follower
-//         for (auto map_it = rpc_clients_map.begin();
-//              map_it != rpc_clients_map.end(); ++map_it) {
-//           // Don't need to send heartbeat to itself
-//           int target_id = map_it->first;
-//           if (target_id == my_id) {
-//             continue;
-//           }
-//           AppendEntriesArgs<Command> heartbeat;
-//           heartbeat.term = current_term;
-//           heartbeat.leader_id = my_id;
-//           heartbeat.lastLogIndex = next_index[map_it->first] - 1;
-//           heartbeat.lastLogTerm = log_vector[heartbeat.lastLogIndex].term;
-//           heartbeat.lastCommit = commit_idx;
-//           heartbeat.log_vector.clear();
-//           thread_pool->enqueue(&RaftNode::send_append_entries, this, target_id,
-//                                heartbeat);
-//         }
-//       }
-//       mtx.unlock();
-//       // We choose heartbeat interval 300 ms. So every servers' timeout limit
-//       // will range from 300ms~600ms
-//       std::this_thread::sleep_for(std::chrono::milliseconds(300));
-//     }
-//   }
-//   return;
-// }
 
 template <typename StateMachine, typename Command>
 void RaftNode<StateMachine, Command>::run_background_ping() {
@@ -1009,7 +989,6 @@ void RaftNode<StateMachine, Command>::run_background_ping() {
           if (target_id == my_id)
             continue;
           if (next_index[target_id] > 0) {
-            // FIXME:
             thread_pool->enqueue(
                 &RaftNode::send_append_entries, this, target_id,
                 AppendEntriesArgs<Command>(
