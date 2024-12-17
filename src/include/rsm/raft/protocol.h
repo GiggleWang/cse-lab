@@ -22,7 +22,7 @@ template <typename Command> struct LogEntry {
   int term;
   Command command;
   LogEntry<Command>() {}
-  LogEntry<Command>(int index, int term, Command command)
+  LogEntry<Command>(int index, int term, Command command = Command())
       : index(index), term(term), command(command) {}
 };
 

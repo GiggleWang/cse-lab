@@ -8,7 +8,6 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
-
 namespace chfs {
 
 /**
@@ -16,16 +15,13 @@ namespace chfs {
  */
 template <typename Command> class RaftLog {
 public:
-  RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover);
-  RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover,
-          int &current_term, int &support_id,
-          std::vector<LogEntry<Command>> &data);
+  RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover, int current_term,
+          int support_id);
   ~RaftLog();
-
   /* Lab3: Your code here */
   void term_and_support_id_update(int current_term, int support_id);
   void log_entry_update(std::vector<LogEntry<Command>> &data);
-  void recover(int &current_term, int &support_id,
+  void recover(int &current_term, int &voted_for,
                std::vector<LogEntry<Command>> &data);
 
 private:
@@ -35,48 +31,29 @@ private:
   std::shared_ptr<FileOperation> file_operation_ptr;
 };
 
-template <typename Command>
-RaftLog<Command>::RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover)
-    : bm_(bm) {
-  /* Lab3: Your code here */
-  if (!should_recover) {
-    file_operation_ptr.reset(new FileOperation(bm_, MAX_INODE_NUM));
-    // for TERM_AND_SUPPORT_INODE_ID
-    file_operation_ptr->alloc_inode(InodeType::FILE);
-    // for LOG_ENTRY_INODE_ID
-    file_operation_ptr->alloc_inode(InodeType::FILE);
-  } else {
-    // recover
-    this->file_operation_ptr = FileOperation::create_from_raw(bm_).unwrap();
-  }
-}
-
-template <typename Command>
-RaftLog<Command>::RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover,
-                          int &current_term, int &support_id,
-                          std::vector<LogEntry<Command>> &data)
-    : bm_(bm) {
-  /* Lab3: Your code here */
-  if (!should_recover) {
-    file_operation_ptr.reset(new FileOperation(bm_, MAX_INODE_NUM));
-    // for TERM_AND_SUPPORT_INODE_ID
-    file_operation_ptr->alloc_inode(InodeType::FILE);
-    // for LOG_ENTRY_INODE_ID
-    file_operation_ptr->alloc_inode(InodeType::FILE);
-    this->term_and_support_id_update(current_term,support_id);
-    this->log_entry_update(data);
-  } else {
-    // recover
-    this->file_operation_ptr = FileOperation::create_from_raw(bm_).unwrap();
-    this->recover(current_term, support_id, data);
-  }
-}
-
 template <typename Command> RaftLog<Command>::~RaftLog() {
   /* Lab3: Your code here */
 }
 
 /* Lab3: Your code here */
+template <typename Command>
+RaftLog<Command>::RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover,
+                          int current_term, int support_id)
+    : bm_(bm) {
+  /* Lab3: Your code here */
+  if (!should_recover) {
+    file_operation_ptr.reset(new FileOperation(bm_, MAX_INODE_NUM));
+    // for TERM_AND_SUPPORT_INODE_ID
+    file_operation_ptr->alloc_inode(InodeType::FILE);
+    // for LOG_ENTRY_INODE_ID
+    file_operation_ptr->alloc_inode(InodeType::FILE);
+    this->term_and_support_id_update(current_term, support_id);
+  } else {
+    // recover
+    this->file_operation_ptr = FileOperation::create_from_raw(bm_).unwrap();
+  }
+}
+
 template <typename Command>
 void RaftLog<Command>::term_and_support_id_update(int current_term,
                                                   int support_id) {

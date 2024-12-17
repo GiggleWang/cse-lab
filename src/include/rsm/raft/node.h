@@ -282,43 +282,24 @@ RaftNode<StateMachine, Command>::RaftNode(int node_id,
 
   /* Lab3: Your code here */
   state = std::make_unique<StateMachine>();
-  thread_pool = std::make_unique<ThreadPool>(32);
-  last_time = std::chrono::time_point_cast<std::chrono::milliseconds>(
-                  std::chrono::high_resolution_clock::now())
-                  .time_since_epoch()
-                  .count();
   next_index.reset(new int[configs.size()]);
   match_index.reset(new int[configs.size()]);
-  /**
-   * Notice that the first log index is 1 instead of 0.
-   * To simplify the programming, you can append an empty log entry to the logs
-   * at the very beginning. And since the 'lastApplied' index starts from 0, the
-   * first empty log entry will never be applied to the state machine.
-   */
-  LogEntry<Command> init_entry;
-  init_entry.term = 0;
-  init_entry.index = 0;
-  log_vector.push_back(init_entry);
-
-  // RaftLog for persistence
+  thread_pool = std::make_unique<ThreadPool>(32);
+  LogEntry<Command> zero_entry(0, 0);
+  log_vector.push_back(zero_entry);
+  this->update_last_time();
   std::string node_log_filename = "/tmp/raft_log/" + std::to_string(node_id);
-  bool is_recover = is_file_exist(node_log_filename);
+  bool should_recover = is_file_exist(node_log_filename);
   auto block_manager =
       std::shared_ptr<BlockManager>(new BlockManager(node_log_filename));
-  // log_storage = std::make_unique<RaftLog<Command>>(
-  //     block_manager, is_file_exist(node_log_filename), this->current_term,
-  //     this->support_id, this->log_vector);
   log_storage = std::make_unique<RaftLog<Command>>(
-      block_manager, is_file_exist(node_log_filename));
-
-  if (is_recover) {
+      block_manager, should_recover, current_term, support_id);
+  if (should_recover) {
     log_storage->recover(current_term, support_id, log_vector);
-  } else {
-    log_storage->term_and_support_id_update(current_term, support_id);
-    log_storage->log_entry_update(log_vector);
   }
+  log_storage->term_and_support_id_update(current_term,support_id);
+  log_storage->log_entry_update(log_vector);
 
-  RAFT_LOG("A new raft node init");
   rpc_server->run(true, configs.size());
 }
 
