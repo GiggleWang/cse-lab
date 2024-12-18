@@ -4,8 +4,10 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 #include "block/manager.h"
+
 #include "distributed/commit_log.h"
 
 namespace chfs {
@@ -45,6 +47,7 @@ BlockManager::BlockManager(usize block_cnt, usize block_size)
   // An important step to prevent overflow
   this->write_fail_cnt = 0;
   this->maybe_failed = false;
+  this->write_to_log = false;
   u64 buf_sz = static_cast<u64>(block_cnt) * static_cast<u64>(block_size);
   CHFS_VERIFY(buf_sz > 0, "Santiy check buffer size fails");
   this->block_data = new u8[buf_sz];
@@ -59,6 +62,7 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt)
     : file_name_(file), block_cnt(block_cnt), in_memory(false) {
   this->write_fail_cnt = 0;
   this->maybe_failed = false;
+  this->write_to_log = false;
   this->fd = open(file.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
   CHFS_ASSERT(this->fd != -1, "Failed to open the block manager file");
 
@@ -77,13 +81,11 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt)
   CHFS_ASSERT(this->block_data != MAP_FAILED, "Failed to mmap the data");
 }
 
-BlockManager::BlockManager(const std::string &file, usize block_cnt,
-                           bool is_log_enabled)
+BlockManager::BlockManager(const std::string &file, usize block_cnt, bool is_log_enabled)
     : file_name_(file), block_cnt(block_cnt), in_memory(false) {
-  auto kLogBlockCnt = 1024;
   this->write_fail_cnt = 0;
   this->maybe_failed = false;
-  // this->write_to_log = false;
+  this->write_to_log = false;
   this->fd = open(file.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
   CHFS_ASSERT(this->fd != -1, "Failed to open the block manager file");
 
@@ -112,8 +114,11 @@ BlockManager::BlockManager(const std::string &file, usize block_cnt,
 
 auto BlockManager::write_block(block_id_t block_id, const u8 *data)
     -> ChfsNullResult {
-  if (logging_enabled) {
-    for (auto &op : this->log_operations) {
+  if (block_id >= this->block_cnt)
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+
+  if (write_to_log) {
+    for (auto &op : log_ops) {
       if (op->block_id_ == block_id) {
         memcpy(op->new_block_state_.data(), data, this->block_sz);
         return KNullOk;
@@ -121,40 +126,33 @@ auto BlockManager::write_block(block_id_t block_id, const u8 *data)
     }
     std::vector<u8> buffer(this->block_sz);
     memcpy(buffer.data(), data, this->block_sz);
-    log_operations.push_back(
-        std::make_shared<BlockOperation>(block_id, buffer));
+    log_ops.push_back(std::make_shared<BlockOperation>(block_id, buffer));
     return KNullOk;
   }
+
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
       return ErrorType::INVALID;
     }
   }
-  if (block_id >= block_cnt || data == nullptr) {
-    return ChfsNullResult(ErrorType::INVALID_ARG);
-  }
 
-  if (in_memory) {
-    // 内存模式
-    std::memcpy(block_data + block_id * block_sz, data, block_sz);
-  } else {
-    // 文件模式
-    lseek(fd, block_id * block_sz, SEEK_SET);
-    if (write(fd, data, block_sz) != block_sz) {
-      return ChfsNullResult(ErrorType::OUT_OF_RESOURCE);
-    }
-  }
+  memcpy(this->block_data + block_id * this->block_sz, data, this->block_sz);
 
   this->write_fail_cnt++;
-  return ChfsNullResult(std::monostate{});
+  return KNullOk;
 }
 
 auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
                                        usize offset, usize len)
     -> ChfsNullResult {
-  if (logging_enabled) {
-    for (auto &op : this->log_operations) {
+  if (block_id >= this->block_cnt)
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+  if (offset + len > this->block_sz)
+    return ChfsNullResult(ErrorType::INVALID_ARG);
+
+  if (write_to_log) {
+    for (auto &op : log_ops) {
       if (op->block_id_ == block_id) {
         memcpy(op->new_block_state_.data() + offset, data, len);
         return KNullOk;
@@ -164,10 +162,10 @@ auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
     memcpy(buffer.data(), this->block_data + block_id * this->block_sz,
            this->block_sz);
     memcpy(buffer.data() + offset, data, len);
-    log_operations.push_back(
-        std::make_shared<BlockOperation>(block_id, buffer));
+    log_ops.push_back(std::make_shared<BlockOperation>(block_id, buffer));
     return KNullOk;
   }
+
   if (this->maybe_failed && block_id < this->block_cnt) {
     if (this->write_fail_cnt >= 3) {
       this->write_fail_cnt = 0;
@@ -175,31 +173,18 @@ auto BlockManager::write_partial_block(block_id_t block_id, const u8 *data,
     }
   }
 
-  if (block_id >= block_cnt || data == nullptr || offset + len > block_sz) {
-    return ChfsNullResult(ErrorType::INVALID_ARG);
-  }
+  memcpy(this->block_data + block_id * this->block_sz + offset, data, len);
 
-  if (in_memory) {
-    // 内存模式
-    std::memcpy(block_data + block_id * block_sz + offset, data, len);
-  } else {
-    // 文件模式
-    lseek(fd, block_id * block_sz + offset, SEEK_SET);
-    if (write(fd, data, len) != len) {
-      return ChfsNullResult(ErrorType::OUT_OF_RESOURCE);
-    }
-  }
   this->write_fail_cnt++;
-  // std::cout << "write_fail_cnt" << write_fail_cnt << std::endl;
-  return ChfsNullResult(std::monostate{});
+  return KNullOk;
 }
 
 auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
-  if (block_id >= block_cnt || data == nullptr) {
+  if (block_id >= this->block_cnt)
     return ChfsNullResult(ErrorType::INVALID_ARG);
-  }
-  if (this->logging_enabled) {
-    for (auto &op : this->log_operations) {
+
+  if (write_to_log) {
+    for (auto &op : log_ops) {
       if (op->block_id_ == block_id) {
         memcpy(data, op->new_block_state_.data(), this->block_sz);
         return KNullOk;
@@ -207,34 +192,18 @@ auto BlockManager::read_block(block_id_t block_id, u8 *data) -> ChfsNullResult {
     }
   }
 
-  if (in_memory) {
-    // 内存模式
-    std::memcpy(data, block_data + block_id * block_sz, block_sz);
-  } else {
-    // 文件模式
-    lseek(fd, block_id * block_sz, SEEK_SET);
-    if (read(fd, data, block_sz) != block_sz) {
-      return ChfsNullResult(ErrorType::OUT_OF_RESOURCE);
-    }
-  }
-  return ChfsNullResult(std::monostate{});
+  memcpy(data, this->block_data + block_id * this->block_sz, this->block_sz);
+
+  return KNullOk;
 }
 
 auto BlockManager::zero_block(block_id_t block_id) -> ChfsNullResult {
-  if (block_id >= block_cnt) {
+  if (block_id >= this->block_cnt)
     return ChfsNullResult(ErrorType::INVALID_ARG);
-  }
 
-  std::vector<u8> zero_data(block_sz, 0);
+  memset(this->block_data + block_id * this->block_sz, 0, this->block_sz);
 
-  if (in_memory) {
-    // 内存模式
-    std::memcpy(block_data + block_id * block_sz, zero_data.data(), block_sz);
-  } else {
-    // 文件模式
-    return write_block(block_id, zero_data.data());
-  }
-  return ChfsNullResult(std::monostate{});
+  return KNullOk;
 }
 
 auto BlockManager::sync(block_id_t block_id) -> ChfsNullResult {
@@ -243,26 +212,33 @@ auto BlockManager::sync(block_id_t block_id) -> ChfsNullResult {
   }
 
   auto res = msync(this->block_data + block_id * this->block_sz, this->block_sz,
-                   MS_SYNC | MS_INVALIDATE);
+        MS_SYNC | MS_INVALIDATE);
   if (res != 0)
     return ChfsNullResult(ErrorType::INVALID);
   return KNullOk;
 }
 
 auto BlockManager::flush() -> ChfsNullResult {
-  auto res = msync(this->block_data, this->block_sz * this->block_cnt,
-                   MS_SYNC | MS_INVALIDATE);
+  auto res = msync(this->block_data, this->block_sz * this->block_cnt, MS_SYNC | MS_INVALIDATE);
   if (res != 0)
     return ChfsNullResult(ErrorType::INVALID);
   return KNullOk;
 }
 
-auto BlockManager::sync_memory(void *data, usize size, int flags)
-    -> ChfsNullResult {
-  auto res = msync(data, size, flags);
+auto BlockManager::flush_log() -> ChfsNullResult {
+  auto res = msync(this->block_data + this->block_cnt * this->block_sz,
+                   this->block_sz * kLogBlockCnt, MS_SYNC | MS_INVALIDATE);
   if (res != 0)
     return ChfsNullResult(ErrorType::INVALID);
   return KNullOk;
+}
+
+auto BlockManager::set_write_to_log(bool is_write_to_log)
+    -> std::vector<std::shared_ptr<BlockOperation>> {
+  this->write_to_log = is_write_to_log;
+  std::vector<std::shared_ptr<BlockOperation>> old_ops;
+  this->log_ops.swap(old_ops);
+  return old_ops;
 }
 
 BlockManager::~BlockManager() {

@@ -1,12 +1,7 @@
 #include "distributed/metadata_server.h"
 #include "common/util.h"
 #include "filesystem/directory_op.h"
-#include "metadata/inode.h"
-#include "metadata/manager.h"
-#include <bits/types/FILE.h>
 #include <fstream>
-#include <tuple>
-#include <vector>
 
 namespace chfs {
 
@@ -87,7 +82,6 @@ inline auto MetadataServer::init_fs(const std::string &data_path) {
       operation_->block_manager_->set_may_fail(true);
     commit_log = std::make_shared<CommitLog>(operation_->block_manager_,
                                              is_checkpoint_enabled_);
-    commit_log->recover();
   }
 
   bind_handlers();
@@ -128,326 +122,365 @@ MetadataServer::MetadataServer(std::string const &address, u16 port,
 // {Your code here}
 auto MetadataServer::mknode(u8 type, inode_id_t parent, const std::string &name)
     -> inode_id_t {
-  std::lock_guard<std::mutex> lock(mtx);
+  std::unique_lock<std::mutex> lock(mutex_);
+
+  auto inode_type = type == DirectoryType     ? InodeType::Directory
+                    : type == RegularFileType ? InodeType::FILE
+                                              : InodeType::Unknown;
+  if (inode_type == InodeType::Unknown)
+    return KInvalidInodeID;
+
   if (is_log_enabled_) {
     operation_->block_manager_->set_write_to_log(true);
   }
-  InodeType inode_type = InodeType::Unknown;
-  if (type == DirectoryType) {
-    inode_type = InodeType::Directory;
-  }
-  if (type == RegularFileType) {
-    inode_type = InodeType::FILE;
-  }
-  if (inode_type == InodeType::Unknown) {
+
+  auto res = operation_->mk_helper(parent, name.c_str(), inode_type);
+  if (res.is_err())
     return KInvalidInodeID;
+
+  if (!is_log_enabled_) {
+    return res.unwrap();
   }
-  auto mk_res = this->operation_->mk_helper(parent, name.data(), inode_type);
-  if (mk_res.is_err()) {
-    return KInvalidInodeID;
+
+  auto log_ops = operation_->block_manager_->set_write_to_log(false);
+  auto txn_id = commit_log->gen_txn_id();
+  commit_log->append_log(txn_id, log_ops);
+  for (auto &op : log_ops) {
+    auto write_res = operation_->block_manager_->write_block(
+        op->block_id_, op->new_block_state_.data());
+    if (write_res.is_err())
+      return KInvalidInodeID;
   }
-  if (is_log_enabled_) {
-    auto log_ops = operation_->block_manager_->set_write_to_log(false);
-    auto txn_id = commit_log->new_txn_id();
-    // auto txn_id = commit_log->gen_txn_id();
-    commit_log->append_log(txn_id, log_ops);
-    // std::cout<<"append_log--- txn_id:"<<txn_id<<std::endl;
-    for (const auto &op : log_ops) {
-      auto write_res = operation_->block_manager_->write_block(
-          op->block_id_, op->new_block_state_.data());
-      if (write_res.is_err()) {
-        return KInvalidInodeID;
-      }
-    }
-    // std::cout<<"commit_log--- txn_id:"<<txn_id<<std::endl;
-    commit_log->commit_log(txn_id);
-  }
-  return mk_res.unwrap();
+  commit_log->commit_log(txn_id);
+
+  return res.unwrap();
 }
 
 // {Your code here}
 auto MetadataServer::unlink(inode_id_t parent, const std::string &name)
     -> bool {
-  std::lock_guard<std::mutex> lock(mtx);
-  auto type_res = this->operation_->gettype(parent);
-  if (type_res.is_err()) {
-    return false;
+  std::unique_lock<std::mutex> lock(mutex_);
+
+  if (is_log_enabled_) {
+    operation_->block_manager_->set_write_to_log(true);
   }
+
+  auto lookup_res = operation_->lookup(parent, name.c_str());
+  if (lookup_res.is_err())
+    return false;
+  auto inode_id = lookup_res.unwrap();
+
+  auto type_res = operation_->inode_manager_->get_type(inode_id);
+  if (type_res.is_err())
+    return false;
   auto type = type_res.unwrap();
+
   if (type == InodeType::Directory) {
-    if (is_log_enabled_) {
-      operation_->block_manager_->set_write_to_log(true);
-    }
-    auto look_res = this->operation_->lookup(parent, name.data());
-    if (look_res.is_err()) {
+    auto unlink_res = operation_->unlink(parent, name.c_str());
+    if (unlink_res.is_err())
       return false;
+
+    if (!is_log_enabled_) {
+      return true;
     }
-    auto res = this->operation_->unlink(parent, name.data());
-    if (res.is_err()) {
+
+    auto log_ops = operation_->block_manager_->set_write_to_log(false);
+    auto txn_id = commit_log->gen_txn_id();
+    commit_log->append_log(txn_id, log_ops);
+    for (auto &op : log_ops) {
+      auto write_res = operation_->block_manager_->write_block(
+          op->block_id_, op->new_block_state_.data());
+      if (write_res.is_err())
+        return false;
+    }
+    commit_log->commit_log(txn_id);
+
+    return true;
+  } else if (type == InodeType::FILE) {
+    auto block_map = get_block_map(inode_id);
+
+    auto inode_res = operation_->inode_manager_->get(inode_id);
+    if (inode_res.is_err())
+       return false;
+    auto inode_block_id = inode_res.unwrap();
+    auto free_inode_res = operation_->inode_manager_->free_inode(inode_id);
+    if (free_inode_res.is_err())
       return false;
+    auto free_block_res =
+        operation_->block_allocator_->deallocate(inode_block_id);
+    if (free_block_res.is_err())
+      return false;
+    
+    for (auto &block : block_map) {
+      auto [block_id, mac_id, version_id] = block;
+      auto it = clients_.find(mac_id);
+      if (it == clients_.end())
+        return false;
+      auto cli = it->second;
+
+      auto free_res = cli->call("free_block", block_id);
+      if (free_res.is_err())
+        return false;
+      
+      auto ok = free_res.unwrap()->as<bool>();
+      if (!ok)
+        return false;
     }
-    if (is_log_enabled_) {
-      auto log_ops = operation_->block_manager_->set_write_to_log(false);
-      auto txn_id = commit_log->new_txn_id();
-      commit_log->append_log(txn_id, log_ops);
-      for (const auto &op : log_ops) {
-        auto write_res = operation_->block_manager_->write_block(
-            op->block_id_, op->new_block_state_.data());
-        if (write_res.is_err()) {
-          return false; // 如果写入失败，返回 false
-        }
-      }
-      commit_log->commit_log(txn_id);
-    }
+  }
+  
+  std::list<DirectoryEntry> list;
+  auto read_res = read_directory(operation_.get(), parent, list);
+  if (read_res.is_err())
+    return false;
+  auto dir_str = dir_list_to_string(list);
+  auto new_dir_str = rm_from_directory(dir_str, name);
+
+  std::vector<u8> content(new_dir_str.begin(), new_dir_str.end());
+  auto write_res = operation_->write_file(parent, content);
+  if (write_res.is_err())
+    return false;
+
+  if (!is_log_enabled_) {
     return true;
   }
-  return false;
+
+  auto log_ops = operation_->block_manager_->set_write_to_log(false);
+  auto txn_id = commit_log->gen_txn_id();
+  commit_log->append_log(txn_id, log_ops);
+  for (auto &op : log_ops) {
+    auto write_res = operation_->block_manager_->write_block(
+        op->block_id_, op->new_block_state_.data());
+    if (write_res.is_err())
+      return false;
+  }
+  commit_log->commit_log(txn_id);
+  
+  return true;
 }
 
 // {Your code here}
 auto MetadataServer::lookup(inode_id_t parent, const std::string &name)
     -> inode_id_t {
-  auto look_res = this->operation_->lookup(parent, name.data());
-  if (look_res.is_err()) {
+  std::unique_lock<std::mutex> lock(mutex_);
+
+  auto res = operation_->lookup(parent, name.c_str());
+  if (res.is_err())
     return KInvalidInodeID;
-  }
-  return look_res.unwrap();
+  return res.unwrap();
 }
 
 // {Your code here}
 auto MetadataServer::get_block_map(inode_id_t id) -> std::vector<BlockInfo> {
-  std::lock_guard<std::mutex> lock(mtx);
-  if (this->operation_->inode_manager_->get_max_inode_supported() < id ||
-      id == KInvalidBlockID) {
+  if (id > operation_->inode_manager_->get_max_inode_supported())
     return {};
-  }
-  // read the inode
-  auto inode_res = this->operation_->inode_manager_->get(id);
-  if (inode_res.is_err()) {
+  if (id == KInvalidInodeID)
     return {};
-  }
-  block_id_t inode_block_id = inode_res.unwrap();
-  const auto block_size = this->operation_->block_manager_->block_size();
-  std::vector<u8> inode(block_size);
-  auto block_res = this->operation_->block_manager_->read_block(inode_block_id,
-                                                                inode.data());
-  if (block_res.is_err()) {
+
+  const auto block_size = operation_->block_manager_->block_size();
+  const auto version_per_block = block_size / sizeof(block_id_t);
+
+  auto inode_res = operation_->inode_manager_->get(id);
+  if (inode_res.is_err())
     return {};
-  }
-  auto inode_ptr = reinterpret_cast<Inode *>(inode.data());
-  if (inode_ptr->get_type() != InodeType::FILE) {
+  auto inode_block_id = inode_res.unwrap();
+
+  std::vector<u8> buffer(block_size);
+  auto inode_p = reinterpret_cast<Inode *>(buffer.data());
+  auto inode_read_res =
+      operation_->block_manager_->read_block(inode_block_id, buffer.data());
+  if (inode_read_res.is_err())
     return {};
-  }
-  //遍历block数组
-  auto nblocks = inode_ptr->get_nblocks();
-  int i = 0;
-  std::vector<BlockInfo> ret_blockinfo;
-  for (; i < nblocks; i += 2) {
-    if (inode_ptr->blocks[i] == KInvalidInodeID) {
+  if (inode_p->get_type() != InodeType::FILE)
+    return {};
+  
+  std::vector<BlockInfo> block_info;
+  for (int i = 0; i < inode_p->get_nblocks(); i += 2) {
+    auto block_id = inode_p->blocks[i];
+    if (block_id == KInvalidBlockID)
       break;
-    }
-    auto block_id = inode_ptr->blocks[i];
-    auto mac_id = inode_ptr->blocks[i + 1];
-    // auto version_id = 0; /*will be implemented later*/
-    auto target_mac_find = clients_.find(mac_id);
-    if (target_mac_find == clients_.end()) {
+
+    auto mac_id = static_cast<mac_id_t>(inode_p->blocks[i + 1]);
+    auto it = clients_.find(mac_id);
+    if (it == clients_.end())
       return {};
-    }
-    auto KVersionPerBlock = block_size / sizeof(version_t);
-    auto version_block_id = block_id / KVersionPerBlock;
-    auto version_in_block_idx = block_id % KVersionPerBlock;
-    auto read_res = target_mac_find->second->call(
-        "read_data", version_block_id, version_in_block_idx * sizeof(version_t),
-        sizeof(version_t), 0);
-    if (read_res.is_err()) {
+    auto cli = it->second;
+
+    auto version_block_id = block_id / version_per_block;
+    auto version_block_offset = block_id % version_per_block;
+
+    auto version_res = cli->call("read_data", version_block_id,
+                                 version_block_offset * sizeof(version_t),
+                                 sizeof(version_t), 0);
+    if (version_res.is_err())
       return {};
-    }
-    auto read_vec = read_res.unwrap()->as<std::vector<u8>>();
-    auto version_ptr = reinterpret_cast<version_t *>(read_vec.data());
-    version_t version_id = *version_ptr;
-    ret_blockinfo.push_back({block_id, mac_id, version_id});
+    auto version_u8v = version_res.unwrap()->as<std::vector<u8>>();
+    auto version_p = reinterpret_cast<version_t *>(version_u8v.data());
+    auto version = *version_p;
+
+    block_info.push_back({block_id, mac_id, version});
   }
-  return ret_blockinfo;
+
+  return block_info;
 }
 
 // {Your code here}
 auto MetadataServer::allocate_block(inode_id_t id) -> BlockInfo {
-  std::lock_guard<std::mutex> lock(mtx);
-  BlockInfo invalidBlockInfo = {KInvalidBlockID, 0, 0};
+  std::unique_lock<std::mutex> lock(mutex_);
 
-  if (this->operation_->inode_manager_->get_max_inode_supported() < id ||
-      id == KInvalidBlockID) {
-    return invalidBlockInfo;
-  }
+  if (id > operation_->inode_manager_->get_max_inode_supported())
+    return {KInvalidBlockID, 0, 0};
+  if (id == KInvalidInodeID)
+    return {KInvalidBlockID, 0, 0};
 
-  // read the inode
-  auto inode_res = this->operation_->inode_manager_->get(id);
-  if (inode_res.is_err()) {
-    return invalidBlockInfo;
-  }
-  block_id_t inode_block_id = inode_res.unwrap();
-  const auto block_size = this->operation_->block_manager_->block_size();
+  auto inode_res = operation_->inode_manager_->get(id);
+  if (inode_res.is_err())
+    return {KInvalidBlockID, 0, 0};
+  auto inode_block_id = inode_res.unwrap();
+  if (inode_block_id == KInvalidBlockID)
+    return {KInvalidBlockID, 0, 0};
+
+  const auto block_size = operation_->block_manager_->block_size();
   std::vector<u8> inode(block_size);
-  auto block_res = this->operation_->block_manager_->read_block(inode_block_id,
-                                                                inode.data());
-  if (block_res.is_err()) {
-    return invalidBlockInfo;
-  }
-  auto inode_ptr = reinterpret_cast<Inode *>(inode.data());
-  if (inode_ptr->get_type() != InodeType::FILE) {
-    return invalidBlockInfo;
-  }
+  auto inode_p = reinterpret_cast<Inode *>(inode.data());
+  auto inode_read_res =
+      operation_->block_manager_->read_block(inode_block_id, inode.data());
+  if (inode_read_res.is_err())
+    return {KInvalidBlockID, 0, 0};
+  if (inode_p->get_type() != InodeType::FILE)
+    return {KInvalidBlockID, 0, 0};
 
-  //遍历block数组，查找是否还有多余的空闲块
-  auto nblocks = inode_ptr->get_nblocks();
-  int i = 0;
-  for (; i < nblocks; i += 2) {
-    if (inode_ptr->blocks[i] == KInvalidBlockID) {
-      break;
-    }
-  }
-  if (i > nblocks) {
-    std::cout << "no free nblocks" << std::endl;
-    return invalidBlockInfo;
-  }
+  int block_idx = 0;
+  while (block_idx < inode_p->get_nblocks() &&
+         inode_p->blocks[block_idx] != KInvalidBlockID)
+    block_idx += 2;
+  if (block_idx >= inode_p->get_nblocks())
+    return {KInvalidBlockID, 0, 0};
 
-  //分配block
-  auto clients_size = clients_.size();
-  auto random_client = generator.rand(0, clients_size - 1);
+  auto rand_mac_idx = generator.rand(0, clients_.size() - 1);
   auto it = clients_.begin();
-  std::advance(it, random_client);
-  auto mac_id = it->first;
-  std::shared_ptr<RpcClient> target_mac = it->second;
-  auto alloc_res = target_mac->call("alloc_block");
-  if (alloc_res.is_err()) {
-    return invalidBlockInfo;
-  }
-  auto [block_id, version_id] =
-      alloc_res.unwrap()->as<std::pair<chfs::block_id_t, chfs::version_t>>();
-  if (block_id == KInvalidBlockID) {
-    return invalidBlockInfo;
-  }
-  inode_ptr->set_block_direct(i, block_id);
-  inode_ptr->set_block_direct(i + 1, mac_id);
-  inode_ptr->set_size(inode_ptr->get_size() + block_size);
-  auto write_res = this->operation_->block_manager_->write_block(inode_block_id,
-                                                                 inode.data());
-  if (write_res.is_err()) {
-    return invalidBlockInfo;
-  }
-  return BlockInfo(block_id, mac_id, version_id);
+  std::advance(it, rand_mac_idx);
+  auto [mac_id, cli] = *it;
+
+  auto alloc_res = cli->call("alloc_block");
+  if (alloc_res.is_err())
+    return {KInvalidBlockID, 0, 0};
+  auto [block_id, version] =
+      alloc_res.unwrap()->as<std::pair<block_id_t, version_t>>();
+  if (block_id == KInvalidBlockID)
+    return {KInvalidBlockID, 0, 0};
+  
+  inode_p->set_block_direct(block_idx, block_id);
+  inode_p->set_block_direct(block_idx + 1, mac_id);
+  inode_p->inner_attr.size += block_size;
+
+  auto write_res =
+      operation_->block_manager_->write_block(inode_block_id, inode.data());
+  if (write_res.is_err())
+    return {KInvalidBlockID, 0, 0};
+
+  return {block_id, mac_id, version};
 }
 
 // {Your code here}
 auto MetadataServer::free_block(inode_id_t id, block_id_t block_id,
                                 mac_id_t machine_id) -> bool {
-  std::lock_guard<std::mutex> lock(mtx);
-  if (this->operation_->inode_manager_->get_max_inode_supported() < id ||
-      id == KInvalidBlockID) {
-    return false;
-  }
-  auto inode_res = this->operation_->inode_manager_->get(id);
-  if (inode_res.is_err()) {
-    return false;
-  }
-  block_id_t inode_block_id = inode_res.unwrap();
-  const auto block_size = this->operation_->block_manager_->block_size();
-  std::vector<u8> inode(block_size);
-  auto block_res = this->operation_->block_manager_->read_block(inode_block_id,
-                                                                inode.data());
-  if (block_res.is_err()) {
-    return false;
-  }
-  auto inode_ptr = reinterpret_cast<Inode *>(inode.data());
-  if (inode_ptr->get_type() != InodeType::FILE) {
-    return false;
-  }
+  std::unique_lock<std::mutex> lock(mutex_);
 
-  //遍历数组，查找需要delete的块
-  auto nblocks = inode_ptr->get_nblocks();
-  int i = 0;
-  for (; i < nblocks; i += 2) {
-    if (inode_ptr->blocks[i] == block_id &&
-        inode_ptr->blocks[i + 1] == machine_id) {
+  if (id > operation_->inode_manager_->get_max_inode_supported())
+    return false;
+  if (id == KInvalidInodeID)
+    return false;
+  if (block_id == KInvalidBlockID)
+    return false;
+  
+  auto inode_res = operation_->inode_manager_->get(id);
+  if (inode_res.is_err())
+    return false;
+  auto inode_block_id = inode_res.unwrap();
+
+  const auto block_size = operation_->block_manager_->block_size();
+  std::vector<u8> buffer(block_size);
+  auto inode_p = reinterpret_cast<Inode *>(buffer.data());
+  auto inode_read_res =
+      operation_->block_manager_->read_block(inode_block_id, buffer.data());
+  if (inode_read_res.is_err())
+    return false;
+  if (inode_p->get_type() != InodeType::FILE)
+    return false;
+  
+  int dir_block_idx = 0;
+  while (dir_block_idx < inode_p->get_nblocks() &&
+         inode_p->blocks[dir_block_idx] != block_id) {
+    if (inode_p->blocks[dir_block_idx] == block_id && 
+        inode_p->blocks[dir_block_idx + 1] == machine_id)
       break;
-    }
+    dir_block_idx += 2;
   }
-  if (i > nblocks) {
-    std::cout << "the block to free not found" << std::endl;
+  if (dir_block_idx >= inode_p->get_nblocks())
     return false;
-  }
+  
+  auto it = clients_.find(machine_id);
+  if (it == clients_.end())
+    return false;
+  auto cli = it->second;
 
-  auto target = this->clients_.find(machine_id);
-  if (target == this->clients_.end()) {
+  auto free_res = cli->call("free_block", block_id);
+  if (free_res.is_err())
     return false;
-  }
-  auto target_mac = target->second;
-  auto delete_res = target_mac->call("free_block", block_id);
-  if (delete_res.is_err()) {
+  auto ok = free_res.unwrap()->as<bool>();
+  if (!ok)
     return false;
-  }
-  auto res = delete_res.unwrap()->as<bool>();
-  if (!res) {
-    return false;
-  }
-  //把后面的block往前挪
-  for (i += 2; i < inode_ptr->get_nblocks(); i += 2) {
-    inode_ptr->set_block_direct(i - 2, inode_ptr->blocks[i]);
-    inode_ptr->set_block_direct(i - 1, inode_ptr->blocks[i + 1]);
-  }
-  inode_ptr->set_block_direct(i - 2, KInvalidBlockID);
-  inode_ptr->set_block_direct(i - 1, KInvalidBlockID);
-  inode_ptr->set_size(inode_ptr->get_size() - block_size);
 
-  auto write_back = this->operation_->block_manager_->write_block(
-      inode_block_id, inode.data());
-  if (write_back.is_err()) {
-    return false;
+  for (; dir_block_idx < inode_p->get_nblocks() - 2; dir_block_idx += 2) {
+    inode_p->set_block_direct(dir_block_idx,
+                              inode_p->blocks[dir_block_idx + 2]);
+    inode_p->set_block_direct(dir_block_idx + 1,
+                              inode_p->blocks[dir_block_idx + 3]);
   }
+  inode_p->set_block_direct(dir_block_idx, KInvalidBlockID);
+  inode_p->set_block_direct(dir_block_idx + 1, 0);
+  if (inode_p->get_size() > block_size)
+    inode_p->inner_attr.size -= block_size;
+  else
+    inode_p->inner_attr.size = 0; 
+
+  auto write_res =
+      operation_->block_manager_->write_block(inode_block_id, buffer.data());
+  if (write_res.is_err())
+    return false;
+
   return true;
 }
 
 // {Your code here}
 auto MetadataServer::readdir(inode_id_t node)
     -> std::vector<std::pair<std::string, inode_id_t>> {
-  std::vector<std::pair<std::string, inode_id_t>> ret_vec;
   std::list<DirectoryEntry> list;
   auto read_res = read_directory(operation_.get(), node, list);
-  if (read_res.is_err()) {
-    return ret_vec;
-  }
-  for (const auto &entry : list) {
-    std::pair<std::string, inode_id_t> vec_element(entry.name, entry.id);
-    ret_vec.push_back(vec_element);
-  }
-  return ret_vec;
+  if (read_res.is_err())
+    return {};
+
+  std::vector<std::pair<std::string, inode_id_t>> dir_list;
+  for (const auto &entry : list)
+    dir_list.push_back({entry.name, entry.id});
+  return dir_list;
 }
 
 // {Your code here}
 auto MetadataServer::get_type_attr(inode_id_t id)
     -> std::tuple<u64, u64, u64, u64, u8> {
-  std::lock_guard<std::mutex> lock(mtx);
-  std::tuple<u64, u64, u64, u64, u8> invalide_res = {0, 0, 0, 0, 0};
-  auto type_attr_res = this->operation_->get_type_attr(id);
-  if (type_attr_res.is_err()) {
-    return invalide_res;
-  }
-  std::pair<InodeType, FileAttr> type_attr_pair = type_attr_res.unwrap();
-  auto type = type_attr_pair.first;
-  u8 ret_type = 0;
-  if (type == InodeType::FILE) {
-    ret_type = RegularFileType;
-  }
-  if (type == InodeType::Directory) {
-    ret_type = DirectoryType;
-  }
-  auto attr = type_attr_pair.second;
-  return {attr.size, attr.atime, attr.mtime, attr.ctime, ret_type};
+  auto res = operation_->get_type_attr(id);
+  if (res.is_err())
+    return {0, 0, 0, 0, 0};
+  auto [type, attr] = res.unwrap();
+  auto type_u8 = type == InodeType::FILE        ? RegularFileType
+                 : type == InodeType::Directory ? DirectoryType
+                                                : 0;
+  return {attr.size, attr.atime, attr.mtime, attr.ctime, type_u8};
 }
 
 auto MetadataServer::reg_server(const std::string &address, u16 port,
                                 bool reliable) -> bool {
-  std::lock_guard<std::mutex> lock(mtx);
   num_data_servers += 1;
   auto cli = std::make_shared<RpcClient>(address, port, reliable);
   clients_.insert(std::make_pair(num_data_servers, cli));

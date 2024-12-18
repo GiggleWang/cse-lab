@@ -1,101 +1,115 @@
 #pragma once
 
-#include "block/manager.h"
 #include "common/macros.h"
-#include "filesystem/operations.h"
-#include "rsm/config.h"
-#include "rsm/raft/protocol.h"
-#include <cstring>
+#include "block/manager.h"
 #include <mutex>
 #include <vector>
+#include <cstring>
+#include <unistd.h>
+#include <sys/mman.h>
+
 namespace chfs {
 
-/**
- * RaftLog uses a BlockManager to manage the data..
- */
-template <typename Command> class RaftLog {
-public:
-  RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover, int current_term,
-          int support_id);
-  ~RaftLog();
-  /* Lab3: Your code here */
-  void term_and_support_id_update(int current_term, int support_id);
-  void log_entry_update(std::vector<LogEntry<Command>> &data);
-  void recover(int &current_term, int &voted_for,
-               std::vector<LogEntry<Command>> &data);
-
-private:
-  std::shared_ptr<BlockManager> bm_;
-  std::mutex mtx;
-  /* Lab3: Your code here */
-  std::shared_ptr<FileOperation> file_operation_ptr;
+template <typename Command>
+struct RaftLogEntry {
+    int index;
+    int term;
+    Command command;
 };
 
-template <typename Command> RaftLog<Command>::~RaftLog() {
-  /* Lab3: Your code here */
-}
-
-/* Lab3: Your code here */
+/** 
+ * RaftLog uses a BlockManager to manage the data..
+ */
 template <typename Command>
-RaftLog<Command>::RaftLog(std::shared_ptr<BlockManager> bm, bool should_recover,
-                          int current_term, int support_id)
-    : bm_(bm) {
-  /* Lab3: Your code here */
-  if (!should_recover) {
-    file_operation_ptr.reset(new FileOperation(bm_, MAX_INODE_NUM));
-    // for TERM_AND_SUPPORT_INODE_ID
-    file_operation_ptr->alloc_inode(InodeType::FILE);
-    // for LOG_ENTRY_INODE_ID
-    file_operation_ptr->alloc_inode(InodeType::FILE);
-    this->term_and_support_id_update(current_term, support_id);
-  } else {
-    // recover
-    this->file_operation_ptr = FileOperation::create_from_raw(bm_).unwrap();
-  }
-}
+class RaftLog {
+public:
+    RaftLog(std::shared_ptr<BlockManager> bm);
+    ~RaftLog();
 
-template <typename Command>
-void RaftLog<Command>::term_and_support_id_update(int current_term,
-                                                  int support_id) {
-  this->mtx.lock();
-  std::vector<int> new_vector = {current_term, support_id};
-  std::vector<u8> u8_vec(reinterpret_cast<u8 *>(new_vector.data()),
-                         reinterpret_cast<u8 *>(new_vector.data()) +
-                             sizeof(int) * 2);
-  this->file_operation_ptr->write_file(TERM_AND_SUPPORT_INODE_ID, u8_vec);
-  this->mtx.unlock();
-}
+    void set_state(int current_term, int voted_for);
+    void set_log_entries(std::vector<RaftLogEntry<Command>> &log_entries);
+    void set_snapshot(std::vector<u8> &snapshot);
+    void recover(int &current_term, int &voted_for, std::vector<RaftLogEntry<Command>> &log_entries, std::vector<u8> &snapshot, int &snapshot_index);
+
+private:
+    std::shared_ptr<BlockManager> bm_;
+    std::mutex mtx;
+
+    int *current_term_ptr;
+    int *voted_for_ptr;
+    int *log_num_ptr;
+    int *snapshot_bytes_ptr;
+    RaftLogEntry<Command> *log_ptr;
+    u8 *snapshot_ptr;
+};
 
 template <typename Command>
-void RaftLog<Command>::log_entry_update(std::vector<LogEntry<Command>> &data) {
-  this->mtx.lock();
-  std::vector<u8> u8_vec;
-  for (const auto &entry : data) {
-    const u8 *ptr = reinterpret_cast<const u8 *>(&entry);
-    u8_vec.insert(u8_vec.end(), const_cast<u8 *>(ptr),
-                  const_cast<u8 *>(ptr) + sizeof(LogEntry<Command>));
-  }
-  file_operation_ptr->write_file(LOG_ENTRY_INODE_ID, u8_vec);
-  this->mtx.unlock();
+RaftLog<Command>::RaftLog(std::shared_ptr<BlockManager> bm) : bm_(bm)
+{
+    const auto BLOCK_SIZE = bm_->block_size();
+    current_term_ptr = reinterpret_cast<int *>(bm_->unsafe_get_block_ptr());
+    voted_for_ptr = current_term_ptr + 1;
+    log_num_ptr = current_term_ptr + 2;
+    snapshot_bytes_ptr = current_term_ptr + 3;
+    log_ptr = reinterpret_cast<RaftLogEntry<Command> *>(bm_->unsafe_get_block_ptr() + BLOCK_SIZE);
+    snapshot_ptr = reinterpret_cast<u8 *>(bm_->unsafe_get_block_ptr() + BLOCK_SIZE * bm_->total_blocks() / 2);
 }
 
 template <typename Command>
-void RaftLog<Command>::recover(int &current_term, int &support_id,
-                               std::vector<LogEntry<Command>> &data) {
-  this->mtx.lock();
-  auto term_and_support_data =
-      file_operation_ptr->read_file(TERM_AND_SUPPORT_INODE_ID).unwrap();
-  auto *term_and_support =
-      reinterpret_cast<const int *>(term_and_support_data.data());
-  current_term = term_and_support[0];
-  support_id = term_and_support[1];
-  auto log_data = file_operation_ptr->read_file(LOG_ENTRY_INODE_ID).unwrap();
-  size_t log_entry_num = log_data.size() / sizeof(LogEntry<Command>);
-  auto *log_entry_data =
-      reinterpret_cast<const LogEntry<Command> *>(log_data.data());
-  // Assign log entries to the output vector
-  data.assign(log_entry_data, log_entry_data + log_entry_num);
-  this->mtx.unlock();
+RaftLog<Command>::~RaftLog()
+{
+}
+
+template <typename Command>
+void RaftLog<Command>::set_state(int current_term, int voted_for)
+{
+    std::unique_lock<std::mutex> lock(mtx);
+
+    *current_term_ptr = current_term;
+    *voted_for_ptr = voted_for;
+    
+    msync(current_term_ptr, 2 * sizeof(int), MS_SYNC | MS_INVALIDATE);
+}
+
+template <typename Command>
+void RaftLog<Command>::set_log_entries(std::vector<RaftLogEntry<Command>> &log_entries)
+{
+    std::unique_lock<std::mutex> lock(mtx);
+
+    *log_num_ptr = log_entries.size();
+    for (int i = 0; i < log_entries.size(); i++)
+        log_ptr[i] = log_entries[i];
+    
+    msync(log_num_ptr, sizeof(int), MS_SYNC | MS_INVALIDATE);
+    msync(log_ptr, log_entries.size() * sizeof(RaftLogEntry<Command>), MS_SYNC | MS_INVALIDATE);
+}
+
+template <typename Command>
+void RaftLog<Command>::set_snapshot(std::vector<u8> &snapshot)
+{
+    std::unique_lock<std::mutex> lock(mtx);
+    
+    *snapshot_bytes_ptr = snapshot.size();
+    memcpy(snapshot_ptr, snapshot.data(), snapshot.size());
+    
+    msync(snapshot_bytes_ptr, sizeof(int), MS_SYNC | MS_INVALIDATE);   
+    msync(snapshot_ptr, *snapshot_bytes_ptr, MS_SYNC | MS_INVALIDATE);
+}
+
+template <typename Command>
+void RaftLog<Command>::recover(int &current_term, int &voted_for, std::vector<RaftLogEntry<Command>> &log_entries, std::vector<u8> &snapshot, int &snapshot_index) {
+    std::unique_lock<std::mutex> lock(mtx);
+
+    current_term = *current_term_ptr;
+    voted_for = *voted_for_ptr;
+    snapshot_index = log_ptr[0].index;
+
+    log_entries.clear();
+    for (int i = 0; i < *log_num_ptr; i++)
+        log_entries.push_back(log_ptr[i]);
+
+    snapshot.resize(*snapshot_bytes_ptr);
+    memcpy(snapshot.data(), snapshot_ptr, *snapshot_bytes_ptr);
 }
 
 } /* namespace chfs */

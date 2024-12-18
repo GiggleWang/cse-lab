@@ -39,55 +39,65 @@ auto dir_list_to_string(const std::list<DirectoryEntry> &entries)
 // {Your code here}
 auto append_to_directory(std::string src, std::string filename, inode_id_t id)
     -> std::string {
-  //       Append the new directory entry to `src`.
-  if (!src.empty()) {
+
+  // Append the new directory entry to `src`.
+  if (!src.empty())
     src += '/';
-  }
+
   src += filename + ':' + inode_id_to_string(id);
+  
   return src;
 }
+
+// {Your code here}
 void parse_directory(std::string &src, std::list<DirectoryEntry> &list) {
-  std::istringstream iss(src);
+
+  std::stringstream ss(src);
   std::string entry;
 
-  while (std::getline(iss, entry, '/')) {
-    auto delimiter_pos = entry.find(':');
-    if (delimiter_pos != std::string::npos) {
-      std::string name = entry.substr(0, delimiter_pos);
-      std::string inode_str = entry.substr(delimiter_pos + 1);
-      inode_id_t id = string_to_inode_id(inode_str);
-      list.emplace_back(DirectoryEntry{name, id});
-    }
+  while (std::getline(ss, entry, '/')) {
+    auto pos = entry.rfind(':');
+    CHFS_ASSERT(pos != std::string::npos, "Invalid directory entry");
+    auto name = entry.substr(0, pos);
+    auto id_str = entry.substr(pos + 1);
+    auto id = string_to_inode_id(id_str);
+    list.push_back({name, id});
   }
+
 }
 
 // {Your code here}
 auto rm_from_directory(std::string src, std::string filename) -> std::string {
 
   auto res = std::string("");
-  //       Remove the directory entry from `src`.
+
+  // Remove the directory entry from `src`.
   std::list<DirectoryEntry> list;
   parse_directory(src, list);
 
-  list.remove_if([&filename](const DirectoryEntry &entry) {
+  list.remove_if([filename](const DirectoryEntry &entry) {
     return entry.name == filename;
   });
 
-  return dir_list_to_string(list);
+  res = dir_list_to_string(list);
+
+  return res;
 }
+
 /**
  * { Your implementation here }
  */
 auto read_directory(FileOperation *fs, inode_id_t id,
                     std::list<DirectoryEntry> &list) -> ChfsNullResult {
-  auto read_result = fs->read_file(id); // 读取目录文件内容
-  if (!read_result.is_ok()) {
-    return read_result.unwrap_error(); // 如果读取失败，返回错误
+  
+  auto res = fs->read_file(id);
+  if (res.is_err()) {
+    return ChfsNullResult(res.unwrap_error());
   }
-  auto res = read_result.unwrap();
-  std::string directory_content(res.begin(),
-                                res.end()); // 将读取到的字节内容转换为字符串
-  parse_directory(directory_content, list); // 解析目录内容
+
+  auto dir_u8v = res.unwrap();
+  std::string dir_str(dir_u8v.begin(), dir_u8v.end());
+  parse_directory(dir_str, list);
 
   return KNullOk;
 }
@@ -95,86 +105,89 @@ auto read_directory(FileOperation *fs, inode_id_t id,
 // {Your code here}
 auto FileOperation::lookup(inode_id_t id, const char *name)
     -> ChfsResult<inode_id_t> {
-  std::list<DirectoryEntry> entries;
-  auto read_result = read_directory(this, id, entries); // 读取目录内容
-  if (!read_result.is_ok()) {
-    return ChfsResult<inode_id_t>(
-        ErrorType::NotExist); // 如果目录读取失败，返回错误
+  std::list<DirectoryEntry> list;
+
+  auto res = read_directory(this, id, list);
+  if (res.is_err()) {
+    return ChfsResult<inode_id_t>(res.unwrap_error());
   }
 
-  for (const auto &entry : entries) {
-    if (entry.name == name) { // 如果找到对应文件名，返回 inode ID
+  for (const auto &entry : list) {
+    if (entry.name == name) {
       return ChfsResult<inode_id_t>(entry.id);
     }
   }
-  return ChfsResult<inode_id_t>(
-      ErrorType::NotExist); // 如果没有找到，返回 NotExist 错误
+
+  return ChfsResult<inode_id_t>(ErrorType::NotExist);
 }
 
 // {Your code here}
 auto FileOperation::mk_helper(inode_id_t id, const char *name, InodeType type)
     -> ChfsResult<inode_id_t> {
-  // 1. Check if `name` already exists in the parent.
-  //    If already exist, return ErrorType::AlreadyExist.
-  // 2. Create the new inode.
-  // 3. Append the new entry to the parent directory.
-  auto lookup_result = lookup(id, name);
-  if (lookup_result.is_ok()) {
-    return ChfsResult<inode_id_t>(
-        ErrorType::AlreadyExist); // 如果文件名已存在，返回 AlreadyExist 错误
+
+  // Check if `name` already exists in the parent.
+  // If already exist, return ErrorType::AlreadyExist.
+  auto lookup_res = lookup(id, name);
+  if (lookup_res.is_ok()) {
+    return ChfsResult<inode_id_t>(ErrorType::AlreadyExist);
   }
-  auto inode_result = alloc_inode(type);
-  if (!inode_result.is_ok()) {
-    return inode_result.unwrap_error(); // 分配 inode 失败时返回错误
+  
+  // Create the new inode.
+  auto inode_res = alloc_inode(type);
+  if (inode_res.is_err()) {
+    return ChfsResult<inode_id_t>(inode_res.unwrap_error());
   }
+  auto inode_id = inode_res.unwrap();
+  
+  // Append the new entry to the parent directory.
   std::list<DirectoryEntry> list;
   auto read_res = read_directory(this, id, list);
   if (read_res.is_err()) {
-    return read_res.unwrap_error();
+    return ChfsResult<inode_id_t>(read_res.unwrap_error());
   }
   auto dir_str = dir_list_to_string(list);
-  auto inode_id = inode_result.unwrap();
   auto new_dir_str = append_to_directory(dir_str, name, inode_id);
 
   std::vector<u8> content(new_dir_str.begin(), new_dir_str.end());
-  auto write_res = write_file(id, content); // 将更新后的目录内容写回
+  auto write_res = write_file(id, content);
   if (write_res.is_err()) {
-    return write_res.unwrap_error();
+    return ChfsResult<inode_id_t>(write_res.unwrap_error());
   }
-  return ChfsResult<inode_id_t>(
-      static_cast<inode_id_t>(inode_id)); // 返回新创建的 inode ID
+
+  return ChfsResult<inode_id_t>(static_cast<inode_id_t>(inode_id));
 }
 
 // {Your code here}
 auto FileOperation::unlink(inode_id_t parent, const char *name)
     -> ChfsNullResult {
 
-  // 1. Remove the file, you can use the function `remove_file`
-  // 2. Remove the entry from the directory.
-  // 1. 删除文件，使用 remove_file 函数
-  auto lookup_result = lookup(parent, name);
-  if (!lookup_result.is_ok()) {
-    return lookup_result.unwrap_error(); // 如果文件不存在，返回 ENOENT
+  // Remove the file, you can use the function `remove_file`
+  auto lookup_res = lookup(parent, name);
+  if (lookup_res.is_err()) {
+    return ChfsNullResult(lookup_res.unwrap_error());
   }
+  auto inode_id = lookup_res.unwrap();
 
-  inode_id_t file_inode = lookup_result.unwrap();
-  auto remove_result = remove_file(file_inode); // 删除文件
-  if (!remove_result.is_ok()) {
-    return remove_result.unwrap_error(); // 删除文件失败时返回错误
+  auto remove_res = remove_file(inode_id);
+  if (remove_res.is_err()) {
+    return ChfsNullResult(remove_res.unwrap_error());
   }
-
-  // 2. 从目录中移除条目
+  
+  // Remove the entry from the directory.
   std::list<DirectoryEntry> list;
   auto read_res = read_directory(this, parent, list);
   if (read_res.is_err()) {
     return ChfsNullResult(read_res.unwrap_error());
   }
-  auto new_dir = rm_from_directory(dir_list_to_string(list), name);
-  auto write_res =
-      write_file(parent, std::vector<u8>(new_dir.begin(), new_dir.end()));
+  auto dir_str = dir_list_to_string(list);
+  auto new_dir_str = rm_from_directory(dir_str, name);
+
+  std::vector<u8> content(new_dir_str.begin(), new_dir_str.end());
+  auto write_res = write_file(parent, content);
   if (write_res.is_err()) {
     return ChfsNullResult(write_res.unwrap_error());
   }
+  
   return KNullOk;
 }
 

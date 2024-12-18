@@ -35,6 +35,7 @@ enum class InodeType : u32 {
 
 class Inode;
 class FileOperation;
+class MetadataServer;
 
 /**
  * Abstract the file attributes
@@ -78,6 +79,7 @@ class Inode {
   friend class InodeIterator;
   friend class InodeManager;
   friend class FileOperation;
+  friend class MetadataServer;
 
   InodeType type;
   FileAttr inner_attr;
@@ -114,11 +116,6 @@ public:
    */
   auto get_attr() const -> FileAttr { return inner_attr; }
 
-  /*
-   * Set the file size
-   */
-
-  void set_size(u64 file_size) { this->inner_attr.size = file_size; }
   /**
    * Get the file size
    */

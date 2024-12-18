@@ -11,9 +11,8 @@
 
 #pragma once
 
-#include <memory>
-#include <sys/mman.h>
 #include <vector>
+#include <memory>
 
 #include "common/config.h"
 #include "common/macros.h"
@@ -24,6 +23,7 @@ namespace chfs {
 
 class BlockIterator;
 class BlockOperation;
+
 /**
  * BlockManager implements a block device to read/write block devices
  * Note that the block manager is **not** thread-safe.
@@ -41,10 +41,10 @@ protected:
   bool in_memory; // whether we use in-memory to emulate the block manager
   bool maybe_failed;
   usize write_fail_cnt;
-  bool logging_enabled = false; // 是否启用日志记录
-  std::vector<std::shared_ptr<BlockOperation>> log_operations; // 日志操作列表
+  bool write_to_log;
+  std::vector<std::shared_ptr<BlockOperation>> log_ops;
 
-public:
+ public:
   /**
    * Creates a new block manager that writes to a file-backed block device.
    * @param block_file the file name of the  file to write to
@@ -73,7 +73,7 @@ public:
   /**
    * Creates a new block manager that writes to a file-backed block device.
    * It reserves some blocks for recording logs.
-   *
+   * 
    * @param block_file the file name of the  file to write to
    * @param block_cnt the number of blocks in the device
    * @param is_log_enabled whether to enable log
@@ -141,43 +141,21 @@ public:
   auto flush() -> ChfsNullResult;
 
   /**
-   * Flush the target memory
+   * Flush the log
    */
-  auto sync_memory(void *data, usize size,
-                   int flags = (MS_SYNC | MS_INVALIDATE)) -> ChfsNullResult;
+  auto flush_log() -> ChfsNullResult;
+
+  /**
+   * Set whether to write to the log
+   */
+  auto set_write_to_log(bool is_write_to_log)
+      -> std::vector<std::shared_ptr<BlockOperation>>;
+
   /**
    * Mark the block manager as may fail state
    */
-  auto set_may_fail(bool may_fail) -> void { this->maybe_failed = may_fail; }
-
-  /**
-   * Enables or disables logging and returns the recorded log operations when
-   * disabling.
-   *
-   * @param enable If true, enable logging and clear the current log. If false,
-   * disable logging and return the recorded log operations.
-   * @return A vector of BlockOperation logs if logging is disabled, otherwise
-   * an empty vector.
-   */
-  auto set_write_to_log(bool enable)
-      -> std::vector<std::shared_ptr<BlockOperation>> {
-    if (enable) {
-      logging_enabled = true;
-      log_operations.clear(); // 清空之前的日志记录
-      return {};              // 返回空向量
-    } else {
-      logging_enabled = false;
-      auto logs = log_operations; // 复制日志操作
-      log_operations.clear();     // 清空内部日志记录
-      return logs;                // 返回日志操作
-    }
-  }
-  auto flush_log() -> ChfsNullResult {
-    auto res = msync(this->block_data + this->block_cnt * this->block_sz,
-                     this->block_sz * 1024, MS_SYNC | MS_INVALIDATE);
-    if (res != 0)
-      return ChfsNullResult(ErrorType::INVALID);
-    return KNullOk;
+  auto set_may_fail(bool may_fail) -> void {
+    this->maybe_failed = may_fail;
   }
 };
 
