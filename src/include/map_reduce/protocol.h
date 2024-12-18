@@ -49,6 +49,7 @@ namespace mapReduce {
         std::shared_ptr<chfs::ChfsClient> chfs_client;
         std::vector<std::string> files;
         std::string outPutFile;
+        void write_to_output_file(std::string out_res);
     };
 
     class Coordinator {

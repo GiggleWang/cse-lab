@@ -1,6 +1,6 @@
 # 定义目标
 # lab2
-.PHONY: stress-test compile-code unit-test clear compile
+.PHONY: stress-test compile-code unit-test clear compile lab4-test
 compile-code:
 	mkdir -p build && cd build && cmake .. && make -j && make build-tests -j
 
@@ -15,3 +15,6 @@ clean:
 
 compile:
 	mkdir -p build && cd build && cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
+
+lab4-test:
+	mkdir -p build && cd build && cmake .. && make -j && make build-tests -j && make run_mr_test
