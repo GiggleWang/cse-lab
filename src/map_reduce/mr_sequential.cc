@@ -20,12 +20,7 @@ void SequentialMapReduce::doWork() {
   // Map
   std::vector<KeyVal> all_map;
   for (auto file : files) {
-    auto inode = this->chfs_client->lookup(1, file).unwrap();
-    auto inode_type_attr = this->chfs_client->get_type_attr(inode).unwrap();
-    auto length = inode_type_attr.second.size;
-    auto words = this->chfs_client->read_file(inode, 0, length).unwrap();
-    std::string str;
-    str.assign(words.begin(), words.end());
+    std::string str = this->get_from_file(file);
     auto map_res = Map(str);
     all_map.insert(all_map.end(), map_res.begin(), map_res.end());
   }
@@ -67,5 +62,14 @@ void SequentialMapReduce::write_to_output_file(std::string out_res) {
   auto out_file = chfs_client->lookup(1, outPutFile).unwrap();
   std::vector<chfs::u8> content(out_res.begin(), out_res.end());
   chfs_client->write_file(out_file, 0, content);
+}
+std::string SequentialMapReduce::get_from_file(std::string file) {
+  auto inode = this->chfs_client->lookup(1, file).unwrap();
+  auto inode_type_attr = this->chfs_client->get_type_attr(inode).unwrap();
+  auto length = inode_type_attr.second.size;
+  auto words = this->chfs_client->read_file(inode, 0, length).unwrap();
+  std::string str;
+  str.assign(words.begin(), words.end());
+  return str;
 }
 } // namespace mapReduce

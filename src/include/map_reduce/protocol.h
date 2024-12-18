@@ -50,6 +50,7 @@ namespace mapReduce {
         std::vector<std::string> files;
         std::string outPutFile;
         void write_to_output_file(std::string out_res);
+        std::string get_from_file(std::string file);
     };
 
     class Coordinator {
